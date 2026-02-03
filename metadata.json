@@ -1,0 +1,7 @@
+{
+  "name": "MedLink ER Coordination",
+  "description": "A high-fidelity pre-arrival coordination platform for medics and emergency departments featuring an AI voice agent for rapid data entry and real-time triage dashboards.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
