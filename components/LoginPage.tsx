@@ -64,8 +64,13 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-blue-50 flex items-center justify-center p-4 sm:p-6">
-      <div className="w-full max-w-md">
+    <div className="relative min-h-screen bg-gradient-to-br from-slate-50 via-white to-blue-50 flex items-center justify-center p-4 sm:p-6 overflow-hidden">
+      <div className="absolute inset-0 z-0">
+        {/* Spline scene commented out due to 403 error. Waiting for valid public URL. */}
+        {/* <Spline scene="https://prod.spline.design/67f56854-67d0-4779-b5ed-371c2f5d169e/scene.splinecode" /> */}
+        <div className="w-full h-full bg-slate-50 opacity-50"></div>
+      </div>
+      <div className="w-full max-w-md relative z-10">
         {/* Card */}
         <div className="bg-white rounded-3xl shadow-xl shadow-slate-200/50 border border-slate-100 overflow-hidden">
           {/* Header */}
@@ -87,11 +92,10 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                 <button
                   type="button"
                   onClick={() => setRole('MEDIC')}
-                  className={`flex items-center justify-center gap-2 py-3 px-4 rounded-lg font-semibold text-sm transition-all ${
-                    role === 'MEDIC'
-                      ? 'bg-white text-blue-600 shadow-sm border border-slate-200'
-                      : 'text-slate-500 hover:text-slate-700'
-                  }`}
+                  className={`flex items-center justify-center gap-2 py-3 px-4 rounded-lg font-semibold text-sm transition-all ${role === 'MEDIC'
+                    ? 'bg-white text-blue-600 shadow-sm border border-slate-200'
+                    : 'text-slate-500 hover:text-slate-700'
+                    }`}
                 >
                   <Shield className="w-4 h-4" />
                   Ambulance Medic
@@ -99,11 +103,10 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                 <button
                   type="button"
                   onClick={() => setRole('HOSPITAL')}
-                  className={`flex items-center justify-center gap-2 py-3 px-4 rounded-lg font-semibold text-sm transition-all ${
-                    role === 'HOSPITAL'
-                      ? 'bg-white text-blue-600 shadow-sm border border-slate-200'
-                      : 'text-slate-500 hover:text-slate-700'
-                  }`}
+                  className={`flex items-center justify-center gap-2 py-3 px-4 rounded-lg font-semibold text-sm transition-all ${role === 'HOSPITAL'
+                    ? 'bg-white text-blue-600 shadow-sm border border-slate-200'
+                    : 'text-slate-500 hover:text-slate-700'
+                    }`}
                 >
                   <Building2 className="w-4 h-4" />
                   Hospital Staff
