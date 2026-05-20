@@ -1,10 +1,10 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { GoogleGenAI, Modality, LiveServerMessage } from '@google/genai';
-import { MedicProfile, PreArrivalAlert, DutyStatus, CaseSeverity, EmergencyType, Vitals } from '../types';
+import { AlertAttachment, MedicProfile, PreArrivalAlert, DutyStatus, CaseSeverity, EmergencyType, Vitals } from '../types';
 import { 
   User, Clipboard, Plus, Mic, X, Check, Activity, Clock, MapPin, Shield, Phone, Camera,
-  AlertTriangle, AlertCircle, CheckCircle, ChevronLeft, Volume2, Send, Square, Image as ImageIcon
+  AlertTriangle, AlertCircle, CheckCircle, ChevronLeft, Volume2, Send, Square, Image as ImageIcon, FileText
 } from 'lucide-react';
 import { 
   encodePCM, 
@@ -21,9 +21,12 @@ interface MedicInterfaceProps {
   alerts: PreArrivalAlert[];
   onNewAlert: (alert: PreArrivalAlert) => void;
   onUpdateAlert: (alertId: string, updates: Partial<PreArrivalAlert>) => void;
+  etaSeconds: Record<string, number>;
+  formatEta: (alertId: string) => string;
+  isImminent: (alertId: string) => boolean;
 }
 
-const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAlert, onUpdateAlert }) => {
+const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAlert, onUpdateAlert, etaSeconds, formatEta, isImminent }) => {
   const [activeTab, setActiveTab] = useState<'DASH' | 'PROFILE'>('DASH');
   const [viewMode, setViewMode] = useState<ViewMode>('DASH');
   const [selectedAlertId, setSelectedAlertId] = useState<string | null>(null);
@@ -35,6 +38,7 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
   const [transcript, setTranscript] = useState("");
   const [agentResponse, setAgentResponse] = useState("Standing by. Describe the patient's condition...");
   const [isLiveConnected, setIsLiveConnected] = useState(false);
+  const emergencyTypeOptions = Object.values(EmergencyType);
   
   const [formData, setFormData] = useState<Partial<PreArrivalAlert>>({
     patientName: "",
@@ -45,7 +49,8 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
     vitals: [{ heartRate: 0, bloodPressure: "", spo2: 0, timestamp: "" }],
     treatments: ["Oxygen", "IV Access"],
     notes: "",
-    imageUrl: ""
+    imageUrl: "",
+    attachments: []
   });
 
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -55,6 +60,7 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
   const nextStartTimeRef = useRef<number>(0);
   const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const documentInputRef = useRef<HTMLInputElement>(null);
   const formDataRef = useRef<Partial<PreArrivalAlert>>(formData);
   const agentResponseRef = useRef<string>('');
   const speechRecognitionRef = useRef<{ stop: () => void } | null>(null);
@@ -83,6 +89,31 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
     setFormData(prev => ({ ...prev, [field]: value }));
   };
 
+  const handleVitalsManualInput = (field: 'heartRate' | 'bloodPressure' | 'spo2', value: string) => {
+    setFormData(prev => {
+      const prevVitals = prev.vitals ?? [];
+      const currentVital = prevVitals.length > 0 ? prevVitals[prevVitals.length - 1] : { heartRate: 0, bloodPressure: "", spo2: 0, timestamp: "" };
+      let nextValue: number | string = value;
+
+      if (field !== 'bloodPressure') {
+        const parsed = Number(value);
+        nextValue = Number.isNaN(parsed) ? 0 : parsed;
+      }
+
+      const newEntry: Vitals = {
+        ...currentVital,
+        [field]: nextValue,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        capturedAt: Date.now(),
+      };
+
+      return {
+        ...prev,
+        vitals: [...prevVitals, newEntry],
+      };
+    });
+  };
+
   const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
@@ -92,6 +123,43 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
       };
       reader.readAsDataURL(file);
     }
+  };
+
+  const readFileAsDataUrl = (file: File): Promise<string> => (
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result as string);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    })
+  );
+
+  const handleDocumentSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
+    if (files.length === 0) return;
+
+    const nextAttachments = await Promise.all(files.map(async (file) => ({
+      name: file.name,
+      mimeType: file.type || 'application/octet-stream',
+      dataUrl: await readFileAsDataUrl(file),
+      uploadedAt: new Date().toISOString(),
+    } satisfies AlertAttachment)));
+
+    setFormData(prev => ({
+      ...prev,
+      attachments: [...(prev.attachments ?? []), ...nextAttachments],
+    }));
+
+    if (documentInputRef.current) {
+      documentInputRef.current.value = '';
+    }
+  };
+
+  const removeAttachment = (index: number) => {
+    setFormData(prev => ({
+      ...prev,
+      attachments: (prev.attachments ?? []).filter((_, i) => i !== index),
+    }));
   };
 
   const startLiveSession = async () => {
@@ -152,18 +220,16 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
               } catch (_) {}
             }
 
+            // AudioWorkletNode — replaces deprecated createScriptProcessor
+            const workletUrl = new URL('../services/pcmWorklet.ts', import.meta.url).href;
+            await audioContextRef.current!.audioWorklet.addModule(workletUrl);
             const source = audioContextRef.current!.createMediaStreamSource(streamRef.current!);
-            const scriptProcessor = audioContextRef.current!.createScriptProcessor(4096, 1, 1);
+            const workletNode = new AudioWorkletNode(audioContextRef.current!, 'pcm-processor');
             
-            scriptProcessor.onaudioprocess = (e) => {
-              const inputData = e.inputBuffer.getChannelData(0);
-              const l = inputData.length;
-              const int16 = new Int16Array(l);
-              for (let i = 0; i < l; i++) {
-                int16[i] = inputData[i] * 32768;
-              }
+            workletNode.port.onmessage = (event) => {
+              const int16Buffer = event.data as ArrayBuffer;
               const pcmBlob = {
-                data: encodePCM(new Uint8Array(int16.buffer)),
+                data: encodePCM(new Uint8Array(int16Buffer)),
                 mimeType: 'audio/pcm;rate=16000',
               };
               sessionPromise.then(session => {
@@ -171,8 +237,8 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
               }).catch(() => {});
             };
             
-            source.connect(scriptProcessor);
-            scriptProcessor.connect(audioContextRef.current!.destination);
+            source.connect(workletNode);
+            workletNode.connect(audioContextRef.current!.destination);
           },
           onmessage: async (message: LiveServerMessage) => {
             const sc = message.serverContent;
@@ -228,16 +294,22 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
                 if (fc.name === 'update_form') {
                   const args = fc.args as any;
                   setFormData(prev => {
-                    const newVitals = [...(prev.vitals || [])];
-                    if (newVitals.length === 0) {
-                      newVitals.push({ heartRate: 0, bloodPressure: "", spo2: 0, timestamp: "" });
+                    const prevVitals = prev.vitals ?? [];
+                    const hasVitalsUpdate = args.heartRate || args.bloodPressure || args.spo2;
+                    let nextVitals = prevVitals;
+
+                    if (hasVitalsUpdate) {
+                      const base = prevVitals.length > 0 ? prevVitals[prevVitals.length - 1] : { heartRate: 0, bloodPressure: "", spo2: 0, timestamp: "" };
+                      const newEntry: Vitals = {
+                        ...base,
+                        ...(args.heartRate ? { heartRate: Number(args.heartRate) } : {}),
+                        ...(args.bloodPressure ? { bloodPressure: String(args.bloodPressure) } : {}),
+                        ...(args.spo2 ? { spo2: Number(args.spo2) } : {}),
+                        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                        capturedAt: Date.now(),
+                      };
+                      nextVitals = [...prevVitals, newEntry];
                     }
-                    const latest = { ...newVitals[0] };
-                    if (args.heartRate) latest.heartRate = Number(args.heartRate);
-                    if (args.bloodPressure) latest.bloodPressure = String(args.bloodPressure);
-                    if (args.spo2) latest.spo2 = Number(args.spo2);
-                    latest.timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-                    newVitals[0] = latest;
 
                     const next = {
                       ...prev,
@@ -248,7 +320,7 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
                       eta: args.eta != null ? Number(args.eta) : prev.eta,
                       notes: args.notes || prev.notes,
                       treatments: args.treatments || prev.treatments,
-                      vitals: newVitals
+                      vitals: nextVitals
                     };
                     formDataRef.current = next;
                     return next;
@@ -336,7 +408,8 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
       ambulanceUnit: medic.unit,
       timestamp: new Date().toISOString(),
       status: 'Incoming',
-      imageUrl: current.imageUrl
+      imageUrl: current.imageUrl,
+      attachments: Array.isArray(current.attachments) ? current.attachments : []
     };
     onNewAlert(finalData);
     setLastCreatedAlertId(finalData.id);
@@ -358,7 +431,8 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
       vitals: [{ heartRate: 0, bloodPressure: "", spo2: 0, timestamp: "" }],
       treatments: ["Oxygen", "IV Access"],
       notes: "",
-      imageUrl: ""
+      imageUrl: "",
+      attachments: []
     };
     formDataRef.current = empty;
     setFormData(empty);
@@ -398,21 +472,25 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
             <h2 className="text-2xl font-black text-slate-900 mb-2">{selectedAlert.patientName}, {selectedAlert.patientAge}</h2>
             <p className="text-slate-500 font-medium mb-4">{selectedAlert.type} Emergency · ETA {selectedAlert.eta} min</p>
             <div className="grid grid-cols-3 gap-4 mb-4">
-              {selectedAlert.vitals?.[0] && (
+              {selectedAlert.vitals && selectedAlert.vitals.length > 0 && (() => {
+                const latestV = selectedAlert.vitals[selectedAlert.vitals.length - 1];
+                return (
                 <>
                   <div className="bg-slate-50 p-4 rounded-xl text-center">
                     <p className="text-[9px] font-black text-slate-400 uppercase mb-1">HR</p>
-                    <p className="text-xl font-black text-slate-800">{selectedAlert.vitals[0].heartRate}</p>
+                    <p className="text-xl font-black text-slate-800">{latestV.heartRate}</p>
                   </div>
                   <div className="bg-slate-50 p-4 rounded-xl text-center">
                     <p className="text-[9px] font-black text-slate-400 uppercase mb-1">BP</p>
-                    <p className="text-xl font-black text-slate-800">{selectedAlert.vitals[0].bloodPressure}</p>
+                    <p className="text-xl font-black text-slate-800">{latestV.bloodPressure}</p>
                   </div>
                   <div className="bg-slate-50 p-4 rounded-xl text-center">
                     <p className="text-[9px] font-black text-slate-400 uppercase mb-1">SpO2</p>
-                    <p className="text-xl font-black text-slate-800">{selectedAlert.vitals[0].spo2}%</p>
+                    <p className="text-xl font-black text-slate-800">{latestV.spo2}%</p>
                   </div>
                 </>
+                );
+              })()
               )}
             </div>
             <div className="flex flex-wrap gap-2 mb-4">
@@ -424,6 +502,24 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
             {selectedAlert.imageUrl && (
               <div className="mt-4 rounded-xl overflow-hidden border border-slate-200">
                 <img src={selectedAlert.imageUrl} alt="Attachment" className="w-full h-auto max-h-64 object-contain" />
+              </div>
+            )}
+            {(selectedAlert.attachments ?? []).length > 0 && (
+              <div className="mt-4">
+                <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Reports & Documents</h4>
+                <div className="space-y-2">
+                  {(selectedAlert.attachments ?? []).map((file, idx) => (
+                    <a
+                      key={`${file.name}-${idx}`}
+                      href={file.dataUrl}
+                      download={file.name}
+                      className="w-full flex items-center gap-2 p-3 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-sm text-slate-700"
+                    >
+                      <FileText className="w-4 h-4 text-blue-500" />
+                      <span className="font-medium truncate">{file.name}</span>
+                    </a>
+                  ))}
+                </div>
               </div>
             )}
           </div>
@@ -444,6 +540,7 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
         treatments: formData.treatments ?? selectedAlert.treatments,
         notes: formData.notes ?? selectedAlert.notes,
         imageUrl: formData.imageUrl ?? selectedAlert.imageUrl,
+        attachments: formData.attachments ?? selectedAlert.attachments,
       });
       setToast("Alert updated.");
       setTimeout(() => setToast(null), 3000);
@@ -485,9 +582,9 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
           <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-100">
             <h3 className="font-bold text-slate-800 mb-4">Vitals</h3>
             <div className="grid grid-cols-3 gap-4">
-              <div><label className="text-[10px] font-black text-slate-400 uppercase block mb-1">HR</label><input type="number" value={formData.vitals?.[0]?.heartRate ?? ""} onChange={e => setFormData(prev => ({ ...prev, vitals: [{ ...(prev.vitals?.[0] ?? { heartRate: 0, bloodPressure: "", spo2: 0, timestamp: "" }), heartRate: Number(e.target.value) || 0 }] }))} className="w-full bg-slate-50 border p-2 rounded-xl" /></div>
-              <div><label className="text-[10px] font-black text-slate-400 uppercase block mb-1">BP</label><input type="text" value={formData.vitals?.[0]?.bloodPressure ?? ""} onChange={e => setFormData(prev => ({ ...prev, vitals: [{ ...(prev.vitals?.[0] ?? { heartRate: 0, bloodPressure: "", spo2: 0, timestamp: "" }), bloodPressure: e.target.value }] }))} className="w-full bg-slate-50 border p-2 rounded-xl" /></div>
-              <div><label className="text-[10px] font-black text-slate-400 uppercase block mb-1">SpO2</label><input type="number" value={formData.vitals?.[0]?.spo2 ?? ""} onChange={e => setFormData(prev => ({ ...prev, vitals: [{ ...(prev.vitals?.[0] ?? { heartRate: 0, bloodPressure: "", spo2: 0, timestamp: "" }), spo2: Number(e.target.value) || 0 }] }))} className="w-full bg-slate-50 border p-2 rounded-xl" /></div>
+              <div><label className="text-[10px] font-black text-slate-400 uppercase block mb-1">HR</label><input type="number" value={(formData.vitals && formData.vitals.length > 0) ? formData.vitals[formData.vitals.length - 1].heartRate : ""} onChange={e => handleVitalsManualInput('heartRate', e.target.value)} className="w-full bg-slate-50 border p-2 rounded-xl" /></div>
+              <div><label className="text-[10px] font-black text-slate-400 uppercase block mb-1">BP</label><input type="text" value={(formData.vitals && formData.vitals.length > 0) ? formData.vitals[formData.vitals.length - 1].bloodPressure : ""} onChange={e => handleVitalsManualInput('bloodPressure', e.target.value)} className="w-full bg-slate-50 border p-2 rounded-xl" /></div>
+              <div><label className="text-[10px] font-black text-slate-400 uppercase block mb-1">SpO2</label><input type="number" value={(formData.vitals && formData.vitals.length > 0) ? formData.vitals[formData.vitals.length - 1].spo2 : ""} onChange={e => handleVitalsManualInput('spo2', e.target.value)} className="w-full bg-slate-50 border p-2 rounded-xl" /></div>
             </div>
           </div>
           <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-100">
@@ -547,12 +644,21 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
 
         <div className="flex-1 flex flex-col items-center justify-center relative">
            <div className="absolute w-[400px] h-[400px] bg-blue-600/10 rounded-full blur-[100px] animate-pulse"></div>
+           <style>{`
+             @keyframes waveformPulse {
+               0%, 100% { transform: scaleY(0.15); }
+               50% { transform: scaleY(1); }
+             }
+           `}</style>
            <div className="flex items-center gap-2 mb-8 h-32">
-              {[...Array(12)].map((_, i) => (
-                <div key={i} className="w-2 bg-blue-500 rounded-full transition-all duration-300 shadow-[0_0_15px_rgba(59,130,246,0.5)]" 
-                     style={{ 
-                       height: isLiveConnected ? `${20 + Math.random() * 100}px` : '10px',
-                       opacity: isLiveConnected ? 1 : 0.2
+              {[40, 70, 55, 90, 45, 100, 60, 85, 50, 75, 65, 80].map((h, i) => (
+                <div key={i} className="w-2 bg-blue-500 rounded-full shadow-[0_0_15px_rgba(59,130,246,0.5)]"
+                     style={{
+                       height: `${h}px`,
+                       opacity: isLiveConnected ? 1 : 0.2,
+                       transformOrigin: 'center',
+                       animation: isLiveConnected ? `waveformPulse ${1.2 + (i % 4) * 0.3}s ease-in-out ${i * 0.1}s infinite` : 'none',
+                       transform: isLiveConnected ? undefined : 'scaleY(0.15)',
                      }}></div>
               ))}
            </div>
@@ -577,7 +683,7 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
                <p className="text-[10px] font-black text-white/30 uppercase mb-3 tracking-widest">BP (MMHG)</p>
                <div className="flex items-center gap-3">
                   <Activity className="w-5 h-5 text-white/20" />
-                  <p className="text-3xl font-black text-white">{formData.vitals?.[0]?.bloodPressure || '---'}</p>
+                  <p className="text-3xl font-black text-white">{(formData.vitals && formData.vitals.length > 0) ? formData.vitals[formData.vitals.length - 1].bloodPressure || '---' : '---'}</p>
                </div>
             </div>
           </div>
@@ -604,6 +710,14 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
           onChange={handleImageSelect} 
           accept="image/*" 
           className="hidden" 
+        />
+        <input
+          type="file"
+          ref={documentInputRef}
+          onChange={e => { void handleDocumentSelect(e); }}
+          accept=".pdf,.doc,.docx,.txt,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
+          multiple
+          className="hidden"
         />
         <div className="bg-white px-4 py-4 border-b border-slate-200 flex items-center justify-between sticky top-0 z-50 shadow-sm">
           <div className="flex items-center gap-3">
@@ -673,6 +787,18 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
                 </button>
               ))}
             </div>
+            <div>
+              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-1">Emergency Type</label>
+              <select
+                value={(formData.type as EmergencyType) || EmergencyType.CARDIAC}
+                onChange={e => handleManualInput('type', e.target.value as EmergencyType)}
+                className="w-full bg-slate-50 border border-slate-200 p-3 rounded-xl text-slate-800 font-medium"
+              >
+                {emergencyTypeOptions.map(type => (
+                  <option key={type} value={type}>{type}</option>
+                ))}
+              </select>
+            </div>
           </div>
 
           <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-100">
@@ -681,17 +807,56 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
               <h3 className="font-bold text-slate-800">Vital Signs</h3>
             </div>
             <div className="grid grid-cols-3 gap-4">
-              <div className="bg-slate-50 p-4 rounded-xl text-center">
-                <p className="text-[9px] font-black text-slate-400 uppercase mb-1">HR</p>
-                <p className="text-2xl font-black text-slate-800">{formData.vitals?.[0]?.heartRate || '---'}</p>
+              {(() => {
+                const lv = (formData.vitals && formData.vitals.length > 0) ? formData.vitals[formData.vitals.length - 1] : null;
+                return (
+                  <>
+                    <div className="bg-slate-50 p-4 rounded-xl text-center">
+                      <p className="text-[9px] font-black text-slate-400 uppercase mb-1">HR</p>
+                      <p className="text-2xl font-black text-slate-800">{lv?.heartRate || '---'}</p>
+                    </div>
+                    <div className="bg-slate-50 p-4 rounded-xl text-center">
+                      <p className="text-[9px] font-black text-slate-400 uppercase mb-1">BP</p>
+                      <p className="text-2xl font-black text-slate-800">{lv?.bloodPressure || '---'}</p>
+                    </div>
+                    <div className="bg-slate-50 p-4 rounded-xl text-center">
+                      <p className="text-[9px] font-black text-slate-400 uppercase mb-1">SpO2</p>
+                      <p className="text-2xl font-black text-slate-800">{lv?.spo2 ? lv.spo2 + '%' : '---'}</p>
+                    </div>
+                  </>
+                );
+              })()}
+            </div>
+            <div className="grid grid-cols-3 gap-4 mt-4">
+              <div>
+                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-1">HR</label>
+                <input
+                  type="number"
+                  value={(formData.vitals && formData.vitals.length > 0) ? formData.vitals[formData.vitals.length - 1].heartRate : ""}
+                  onChange={e => handleVitalsManualInput('heartRate', e.target.value)}
+                  placeholder="BPM"
+                  className="w-full bg-slate-50 border border-slate-200 p-3 rounded-xl"
+                />
               </div>
-              <div className="bg-slate-50 p-4 rounded-xl text-center">
-                <p className="text-[9px] font-black text-slate-400 uppercase mb-1">BP</p>
-                <p className="text-2xl font-black text-slate-800">{formData.vitals?.[0]?.bloodPressure || '---'}</p>
+              <div>
+                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-1">BP</label>
+                <input
+                  type="text"
+                  value={(formData.vitals && formData.vitals.length > 0) ? formData.vitals[formData.vitals.length - 1].bloodPressure : ""}
+                  onChange={e => handleVitalsManualInput('bloodPressure', e.target.value)}
+                  placeholder="120/80"
+                  className="w-full bg-slate-50 border border-slate-200 p-3 rounded-xl"
+                />
               </div>
-              <div className="bg-slate-50 p-4 rounded-xl text-center">
-                <p className="text-[9px] font-black text-slate-400 uppercase mb-1">SpO2</p>
-                <p className="text-2xl font-black text-slate-800">{(formData.vitals?.[0]?.spo2) ? formData.vitals[0].spo2 + "%" : '---'}</p>
+              <div>
+                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-1">SpO2</label>
+                <input
+                  type="number"
+                  value={(formData.vitals && formData.vitals.length > 0) ? formData.vitals[formData.vitals.length - 1].spo2 : ""}
+                  onChange={e => handleVitalsManualInput('spo2', e.target.value)}
+                  placeholder="%"
+                  className="w-full bg-slate-50 border border-slate-200 p-3 rounded-xl"
+                />
               </div>
             </div>
           </div>
@@ -700,10 +865,23 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
             <div className="absolute top-0 left-0 w-full h-1.5 bg-blue-600"></div>
             <Clock className="w-8 h-8 text-blue-500 mb-3" />
             <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500 mb-1">ETA TO ST. JUDE</p>
-            <h2 className="text-6xl font-black tracking-tighter mb-2">0{formData.eta}:42</h2>
+            <h2 className="text-6xl font-black tracking-tighter mb-2">{String(Math.floor((formData.eta ?? 0))).padStart(2, '0')}:{String(0).padStart(2, '0')}</h2>
             <div className="flex items-center gap-2 text-blue-500 text-sm font-black">
               <MapPin className="w-4 h-4" /> Active Navigation
             </div>
+          </div>
+
+          <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-100">
+            <div className="flex items-center gap-3 mb-4">
+              <Clipboard className="w-5 h-5 text-blue-500" />
+              <h3 className="font-bold text-slate-800">Additional Details / Description</h3>
+            </div>
+            <textarea
+              value={formData.notes || ""}
+              onChange={e => handleManualInput('notes', e.target.value)}
+              placeholder="Add any additional observations, history, or scene details..."
+              className="w-full bg-slate-50 border border-slate-200 p-3 rounded-xl min-h-[120px] text-slate-700"
+            />
           </div>
 
           <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-100">
@@ -720,6 +898,14 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
                 <Camera className="w-8 h-8 mb-2 opacity-30 group-hover:opacity-50 transition-opacity" />
                 <span className="text-[10px] font-black uppercase tracking-widest text-center px-4">Add ECG / Photo</span>
               </button>
+              <button
+                type="button"
+                onClick={() => documentInputRef.current?.click()}
+                className="aspect-square bg-slate-50 border-2 border-dashed border-slate-200 rounded-2xl flex flex-col items-center justify-center text-slate-400 group cursor-pointer hover:bg-slate-100 transition-colors"
+              >
+                <FileText className="w-8 h-8 mb-2 opacity-30 group-hover:opacity-50 transition-opacity" />
+                <span className="text-[10px] font-black uppercase tracking-widest text-center px-4">Upload Report</span>
+              </button>
               {formData.imageUrl && (
                 <div className="aspect-square relative rounded-2xl overflow-hidden shadow-sm group border border-slate-100">
                   <img src={formData.imageUrl} alt="Uploaded Supporting Data" className="w-full h-full object-cover" />
@@ -733,6 +919,25 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
                 </div>
               )}
             </div>
+            {(formData.attachments ?? []).length > 0 && (
+              <div className="mt-4 space-y-2">
+                {(formData.attachments ?? []).map((file, idx) => (
+                  <div key={`${file.name}-${idx}`} className="flex items-center justify-between gap-3 p-3 rounded-xl border border-slate-200 bg-slate-50">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <FileText className="w-4 h-4 text-blue-500 shrink-0" />
+                      <span className="text-sm text-slate-700 truncate">{file.name}</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => removeAttachment(idx)}
+                      className="text-xs font-bold text-red-600 hover:text-red-700"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 
@@ -822,7 +1027,7 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
                     </div>
                     <div className="text-right">
                       <p className="text-[10px] text-slate-400 font-black uppercase tracking-widest mb-1">Live ETA</p>
-                      <p className="text-4xl font-black text-blue-600 tracking-tighter tabular-nums">{alert.eta}<span className="text-[10px] ml-0.5 uppercase tracking-widest font-black opacity-40">Min</span></p>
+                      <p className={`text-4xl font-black tracking-tighter tabular-nums ${isImminent(alert.id) ? 'text-red-600 animate-pulse' : 'text-blue-600'}`}>{formatEta(alert.id)}<span className="text-[10px] ml-0.5 uppercase tracking-widest font-black opacity-40">ETA</span></p>
                     </div>
                   </div>
                   <div className="flex gap-2 pt-2 border-t border-slate-100">
