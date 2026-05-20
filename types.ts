@@ -25,6 +25,14 @@ export interface Vitals {
   bloodPressure: string;
   spo2: number;
   timestamp: string;
+  capturedAt?: number; // epoch ms — used for trend chart ordering
+}
+
+export interface AlertAttachment {
+  name: string;
+  mimeType: string;
+  dataUrl: string;
+  uploadedAt: string;
 }
 
 export interface PreArrivalAlert {
@@ -41,6 +49,7 @@ export interface PreArrivalAlert {
   ambulanceUnit: string;
   timestamp: string;
   imageUrl?: string;
+  attachments?: AlertAttachment[];
   status: 'Incoming' | 'Arrived' | 'Handed Over';
 }
 
