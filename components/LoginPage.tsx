@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Shield, Building2, Mail, Lock, AlertCircle, Loader2 } from 'lucide-react';
 import { useAuth, AppRole } from '../context/AuthContext';
+import { isFirebaseConfigured } from '../lib/firebase';
 
 export default function LoginPage() {
   const { login, demoLogin, loading } = useAuth();
@@ -10,7 +11,7 @@ export default function LoginPage() {
   const [error, setError] = useState('');
   const [forgotSent, setForgotSent] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [mode, setMode] = useState<'firebase' | 'demo'>('demo'); // Default to demo until Firebase is configured
+  const [mode, setMode] = useState<'firebase' | 'demo'>(isFirebaseConfigured ? 'firebase' : 'demo');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -207,6 +208,11 @@ export default function LoginPage() {
             ? 'Demo mode: use any email/password to log in without Firebase.'
             : 'Firebase mode: requires a configured Firebase project with Auth enabled.'}
         </p>
+        {!isFirebaseConfigured && (
+          <p className="text-center text-amber-600 text-xs mt-2">
+            Firebase config is missing. Add the `VITE_FIREBASE_*` values before using Firebase Auth.
+          </p>
+        )}
       </div>
     </div>
   );
