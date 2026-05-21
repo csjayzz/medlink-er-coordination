@@ -35,6 +35,12 @@ export interface AlertAttachment {
   uploadedAt: string;
 }
 
+export interface TimelineEntry {
+  action: string;
+  timestamp: number; // epoch ms
+  actor: string;     // e.g. "Medic Unit 7", "MedLink", "Dr. Sharma", "System"
+}
+
 export interface PreArrivalAlert {
   id: string;
   patientName: string;
@@ -48,9 +54,13 @@ export interface PreArrivalAlert {
   medicId: string;
   ambulanceUnit: string;
   timestamp: string;
+  transmittedAt?: number;  // epoch ms — used for Firestore TTL + ordering
   imageUrl?: string;
   attachments?: AlertAttachment[];
   status: 'Incoming' | 'Arrived' | 'Handed Over';
+  allergies?: string[];
+  knownConditions?: string[];
+  timeline?: TimelineEntry[];
 }
 
 export interface MedicProfile {

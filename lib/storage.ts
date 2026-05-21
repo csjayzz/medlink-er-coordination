@@ -1,13 +1,13 @@
 import {
   collection,
-  addDoc,
-  updateDoc,
   doc,
-  query,
-  where,
-  orderBy,
   onSnapshot,
+  orderBy,
+  query,
+  setDoc,
   Unsubscribe,
+  updateDoc,
+  where,
 } from 'firebase/firestore';
 import { db } from './firebase';
 import type { PreArrivalAlert } from '../types';
@@ -23,11 +23,11 @@ const ALERTS_KEY = 'medlink_alerts';
  */
 export async function createAlertInFirestore(alert: PreArrivalAlert): Promise<string> {
   try {
-    const docRef = await addDoc(collection(db, ALERTS_COLLECTION), {
+    await setDoc(doc(db, ALERTS_COLLECTION, alert.id), {
       ...alert,
       transmittedAt: Date.now(),
     });
-    return docRef.id;
+    return alert.id;
   } catch (err) {
     console.warn('Firestore createAlert failed, falling back to localStorage', err);
     // Fallback: save to localStorage
