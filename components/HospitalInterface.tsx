@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react';
-import { PreArrivalAlert, CaseSeverity } from '../types';
-import { Activity, Clock, Shield, Search, AlertTriangle, ArrowUpRight, Bed, Users, Phone, ImageIcon, X, Filter, CheckCircle, AlertCircle, UserCheck, Home, ChevronRight, Stethoscope, FileText } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { PreArrivalAlert, CaseSeverity, TimelineEntry } from '../types';
+import { Activity, Clock, Shield, Search, AlertTriangle, ArrowUpRight, Bed, Users, Phone, ImageIcon, X, Filter, CheckCircle, AlertCircle, UserCheck, Home, ChevronRight, Stethoscope, FileText, Bell, Printer, ListChecks, Sparkles } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { HOSPITAL_CONFIG } from '../lib/hospitalConfig';
 
 // Additional types for PreAssign functionality
 interface Patient {
@@ -467,7 +468,53 @@ const HospitalInterface: React.FC<HospitalInterfaceProps> = ({ alerts, onUpdateA
   const [searchFilter, setSearchFilter] = useState('');
   const [selectedAlertId, setSelectedAlertId] = useState<string | null>(() => alerts[0]?.id ?? null);
   const [currentView, setCurrentView] = useState<'dashboard' | 'preassign'>('dashboard');
-  
+
+  // Feature 22: prep checklist state — tracks checked items per alert
+  const [checklistState, setChecklistState] = useState<Record<string, boolean[]>>({});
+
+  // Feature 24: detail tab (overview / summary / timeline)
+  const [detailTab, setDetailTab] = useState<'overview' | 'summary' | 'timeline'>('overview');
+
+  // Feature 25: AI assignment
+  const [aiAssignment, setAiAssignment] = useState<{ bed: string; doctor: string; nurseTeam: string; reasoning: string } | null>(null);
+  const [isAssigning, setIsAssigning] = useState(false);
+
+  // Feature 20: Browser notification on new alert
+  const prevAlertCountRef = useRef(alerts.length);
+  useEffect(() => {
+    // Request notification permission on mount
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+  }, []);
+
+  useEffect(() => {
+    if (alerts.length > prevAlertCountRef.current) {
+      const newest = alerts[0];
+      // Browser notification
+      if ('Notification' in window && Notification.permission === 'granted' && newest) {
+        new Notification('🚨 New Pre-Arrival Alert', {
+          body: `${newest.patientName}, ${newest.patientAge} — ${newest.type} (${newest.severity})`,
+          icon: '/favicon.ico',
+          tag: `medlink-${newest.id}`,
+        });
+      }
+      // Audio alert
+      try {
+        const audioCtx = new AudioContext();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.frequency.value = 880;
+        gain.gain.value = 0.3;
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.3);
+      } catch {}
+    }
+    prevAlertCountRef.current = alerts.length;
+  }, [alerts.length]);
+
   const selectedAlert = selectedAlertId
     ? (alerts.find(a => a.id === selectedAlertId) ?? null)
     : null;
@@ -491,22 +538,72 @@ const HospitalInterface: React.FC<HospitalInterfaceProps> = ({ alerts, onUpdateA
     if (alert.vitals && alert.vitals.length > 0) {
       return alert.vitals[alert.vitals.length - 1];
     }
-    return {
-      heartRate: '--',
-      bloodPressure: '--/--',
-      spo2: '--',
-      timestamp: '--'
-    };
+    return { heartRate: '--', bloodPressure: '--/--', spo2: '--', timestamp: '--' };
   };
 
   const latestVitals = (selectedAlert?.vitals && selectedAlert.vitals.length > 0)
     ? selectedAlert.vitals[selectedAlert.vitals.length - 1]
-    : {
-        heartRate: '--',
-        bloodPressure: '--/--',
-        spo2: '--',
-        timestamp: '--'
-      };
+    : { heartRate: '--', bloodPressure: '--/--', spo2: '--', timestamp: '--' };
+
+  // Feature 22: Get prep checklist for alert type
+  const getPrepChecklist = (alert: PreArrivalAlert): string[] => {
+    return HOSPITAL_CONFIG.prepChecklists[alert.type] || HOSPITAL_CONFIG.prepChecklists['Other'] || [];
+  };
+
+  // Feature 23: Get prep time in seconds
+  const getPrepTimeSeconds = (alert: PreArrivalAlert): number => {
+    const mins = HOSPITAL_CONFIG.prepTimes[alert.severity]?.[alert.type] ?? 5;
+    return mins * 60;
+  };
+
+  // Feature 25: AI bed/team assignment
+  const runAiAssignment = async (alert: PreArrivalAlert) => {
+    setIsAssigning(true);
+    try {
+      const apiKey = (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_API_KEY);
+      if (!apiKey) {
+        // Demo fallback
+        setTimeout(() => {
+          setAiAssignment({
+            bed: HOSPITAL_CONFIG.beds[Math.floor(Math.random() * HOSPITAL_CONFIG.beds.length)],
+            doctor: HOSPITAL_CONFIG.onCallStaff.doctors[Math.floor(Math.random() * HOSPITAL_CONFIG.onCallStaff.doctors.length)].name,
+            nurseTeam: HOSPITAL_CONFIG.onCallStaff.nurseTeams[Math.floor(Math.random() * HOSPITAL_CONFIG.onCallStaff.nurseTeams.length)],
+            reasoning: `Based on ${alert.type} case with ${alert.severity} severity. Patient requires immediate ${alert.type.toLowerCase()} care protocols.`,
+          });
+          setIsAssigning(false);
+        }, 1500);
+        return;
+      }
+      const { GoogleGenAI } = await import('@google/genai');
+      const ai = new GoogleGenAI({ apiKey });
+      const prompt = `You are a hospital resource allocation AI. Given this incoming patient:
+- Type: ${alert.type}
+- Severity: ${alert.severity}
+- Patient: ${alert.patientName}, age ${alert.patientAge}
+- Treatments: ${alert.treatments.join(', ')}
+- Notes: ${alert.notes}
+
+Available beds: ${HOSPITAL_CONFIG.beds.join(', ')}
+Available doctors: ${HOSPITAL_CONFIG.onCallStaff.doctors.map(d => `${d.name} (${d.specialty})`).join(', ')}
+Available nurse teams: ${HOSPITAL_CONFIG.onCallStaff.nurseTeams.join(', ')}
+
+Respond in VALID JSON only: {"bed":"...", "doctor":"...", "nurseTeam":"...", "reasoning":"..."}`;
+      const result = await ai.models.generateContent({ model: 'gemini-2.0-flash', contents: prompt });
+      const text = result.text?.replace(/```json\n?|```/g, '').trim() || '';
+      const parsed = JSON.parse(text);
+      setAiAssignment(parsed);
+    } catch (err) {
+      console.error('AI assignment failed', err);
+      setAiAssignment({
+        bed: HOSPITAL_CONFIG.beds[0],
+        doctor: HOSPITAL_CONFIG.onCallStaff.doctors[0].name,
+        nurseTeam: HOSPITAL_CONFIG.onCallStaff.nurseTeams[0],
+        reasoning: 'Fallback assignment — AI service unavailable.',
+      });
+    } finally {
+      setIsAssigning(false);
+    }
+  };
 
   // If PreAssign view is active, show that instead
   if (currentView === 'preassign') {
@@ -684,96 +781,312 @@ const HospitalInterface: React.FC<HospitalInterfaceProps> = ({ alerts, onUpdateA
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-8">
-              <div className="space-y-6">
-                {/* Trends Graph */}
-                <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
-                  <h3 className="font-bold text-slate-800 mb-6">Vitals Trend Indicator</h3>
-                  <div className="h-64">
-                    {selectedAlert.vitals && selectedAlert.vitals.length > 0 ? (
-                      <ResponsiveContainer width="100%" height="100%">
-                        <LineChart data={selectedAlert.vitals}>
-                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                          <XAxis dataKey="timestamp" hide />
-                          <YAxis hide domain={['auto', 'auto']} />
-                          <Tooltip 
-                            contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
-                          />
-                          <Line type="monotone" dataKey="heartRate" stroke="#3b82f6" strokeWidth={3} dot={{ r: 4, fill: '#3b82f6' }} />
-                          <Line type="monotone" dataKey="spo2" stroke="#10b981" strokeWidth={3} dot={{ r: 4, fill: '#10b981' }} />
-                        </LineChart>
-                      </ResponsiveContainer>
+            {/* Feature 24: Detail Tab Selector */}
+            <div className="flex items-center gap-2 mb-6 border-b border-slate-200 pb-3">
+              {(['overview', 'summary', 'timeline'] as const).map(tab => (
+                <button
+                  key={tab}
+                  onClick={() => setDetailTab(tab)}
+                  className={`px-5 py-2 rounded-xl text-xs font-bold uppercase tracking-widest transition-all ${
+                    detailTab === tab ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-500 hover:bg-slate-100'
+                  }`}
+                >
+                  {tab}
+                </button>
+              ))}
+            </div>
+
+            {detailTab === 'overview' && (
+              <div className="grid grid-cols-2 gap-6">
+                <div className="space-y-6">
+                  {/* Vitals Trend Chart */}
+                  <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+                    <h3 className="font-bold text-slate-800 mb-6">Vitals Trend Indicator</h3>
+                    <div className="h-64">
+                      {selectedAlert.vitals && selectedAlert.vitals.length > 0 ? (
+                        <ResponsiveContainer width="100%" height="100%">
+                          <LineChart data={selectedAlert.vitals}>
+                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                            <XAxis dataKey="timestamp" hide />
+                            <YAxis hide domain={['auto', 'auto']} />
+                            <Tooltip contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }} />
+                            <Line type="monotone" dataKey="heartRate" stroke="#3b82f6" strokeWidth={3} dot={{ r: 4, fill: '#3b82f6' }} />
+                            <Line type="monotone" dataKey="spo2" stroke="#10b981" strokeWidth={3} dot={{ r: 4, fill: '#10b981' }} />
+                          </LineChart>
+                        </ResponsiveContainer>
+                      ) : (
+                        <div className="h-full flex items-center justify-center text-slate-300 italic text-sm">No data points yet</div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Image / Attachments */}
+                  {selectedAlert.imageUrl && (
+                    <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+                      <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
+                        <ImageIcon className="w-4 h-4 text-blue-500" /> Attached Field Data
+                      </h3>
+                      <div className="aspect-video rounded-xl overflow-hidden bg-slate-100 border border-slate-200">
+                        <img src={selectedAlert.imageUrl} className="w-full h-full object-contain" alt="ECG / Field Photo" />
+                      </div>
+                    </div>
+                  )}
+                  {(selectedAlert.attachments ?? []).length > 0 && (
+                    <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+                      <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
+                        <FileText className="w-4 h-4 text-blue-500" /> Attached Reports
+                      </h3>
+                      <div className="space-y-2">
+                        {(selectedAlert.attachments ?? []).map((file, idx) => (
+                          <a key={`${file.name}-${idx}`} href={file.dataUrl} download={file.name}
+                            className="w-full flex items-center gap-2 p-3 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-sm text-slate-700">
+                            <FileText className="w-4 h-4 text-blue-500" />
+                            <span className="font-medium truncate">{file.name}</span>
+                          </a>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-6">
+                  {/* Feature 22: Prep Checklist */}
+                  <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+                    <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
+                      <ListChecks className="w-5 h-5 text-blue-500" />
+                      {selectedAlert.type} Prep Checklist
+                    </h3>
+                    <div className="space-y-3">
+                      {getPrepChecklist(selectedAlert).map((item, idx) => {
+                        const checks = checklistState[selectedAlert.id] || [];
+                        const isChecked = checks[idx] ?? false;
+                        return (
+                          <label key={idx} className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition-all ${
+                            isChecked ? 'bg-emerald-50 border-emerald-200' : 'bg-slate-50 border-slate-200 hover:border-blue-200'
+                          }`}>
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={() => {
+                                setChecklistState(prev => {
+                                  const arr = [...(prev[selectedAlert.id] || new Array(getPrepChecklist(selectedAlert).length).fill(false))];
+                                  arr[idx] = !arr[idx];
+                                  return { ...prev, [selectedAlert.id]: arr };
+                                });
+                              }}
+                              className="w-4 h-4 text-emerald-600 rounded"
+                            />
+                            <span className={`text-sm font-medium ${isChecked ? 'text-emerald-700 line-through' : 'text-slate-700'}`}>{item}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                    {(() => {
+                      const checks = checklistState[selectedAlert.id] || [];
+                      const total = getPrepChecklist(selectedAlert).length;
+                      const done = checks.filter(Boolean).length;
+                      return total > 0 ? (
+                        <div className="mt-4 flex items-center gap-3">
+                          <div className="flex-1 bg-slate-100 h-2 rounded-full overflow-hidden">
+                            <div className="bg-emerald-500 h-full rounded-full transition-all" style={{ width: `${(done / total) * 100}%` }} />
+                          </div>
+                          <span className="text-xs font-bold text-slate-500">{done}/{total}</span>
+                        </div>
+                      ) : null;
+                    })()}
+                  </div>
+
+                  {/* Feature 23: Prep Countdown */}
+                  {(() => {
+                    const etaSec = etaSeconds[selectedAlert.id] ?? 0;
+                    const prepSec = getPrepTimeSeconds(selectedAlert);
+                    const timeLeft = etaSec - prepSec;
+                    const isBehind = timeLeft < 0;
+                    return (
+                      <div className={`p-5 rounded-2xl border shadow-sm ${isBehind ? 'bg-red-50 border-red-200' : 'bg-emerald-50 border-emerald-200'}`}>
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-1">Prep Window</p>
+                            <p className={`text-2xl font-black tabular-nums ${isBehind ? 'text-red-600' : 'text-emerald-600'}`}>
+                              {isBehind ? '⚠ BEHIND' : `${Math.floor(timeLeft / 60)}:${String(Math.abs(timeLeft) % 60).padStart(2, '0')}`}
+                            </p>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-xs text-slate-500">Need: {Math.ceil(prepSec / 60)} min</p>
+                            <p className="text-xs text-slate-500">ETA: {formatEta(selectedAlert.id)}</p>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  {/* Feature 25: AI Bed & Team Assignment */}
+                  <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+                    <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
+                      <Sparkles className="w-5 h-5 text-purple-500" /> AI Resource Assignment
+                    </h3>
+                    {aiAssignment ? (
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between p-3 bg-purple-50 rounded-xl border border-purple-200">
+                          <span className="text-xs font-bold text-purple-600 uppercase">Bed</span>
+                          <span className="font-bold text-purple-800">{aiAssignment.bed}</span>
+                        </div>
+                        <div className="flex items-center justify-between p-3 bg-blue-50 rounded-xl border border-blue-200">
+                          <span className="text-xs font-bold text-blue-600 uppercase">Doctor</span>
+                          <span className="font-bold text-blue-800">{aiAssignment.doctor}</span>
+                        </div>
+                        <div className="flex items-center justify-between p-3 bg-emerald-50 rounded-xl border border-emerald-200">
+                          <span className="text-xs font-bold text-emerald-600 uppercase">Nurse Team</span>
+                          <span className="font-bold text-emerald-800">{aiAssignment.nurseTeam}</span>
+                        </div>
+                        <p className="text-xs text-slate-500 italic mt-2">{aiAssignment.reasoning}</p>
+                        <button onClick={() => setAiAssignment(null)} className="text-xs text-slate-400 hover:text-red-500 font-bold uppercase tracking-widest">
+                          Clear
+                        </button>
+                      </div>
                     ) : (
-                      <div className="h-full flex items-center justify-center text-slate-300 italic text-sm">No data points yet</div>
+                      <button
+                        onClick={() => runAiAssignment(selectedAlert)}
+                        disabled={isAssigning}
+                        className="w-full bg-purple-600 hover:bg-purple-700 disabled:bg-purple-400 text-white font-bold py-3 rounded-xl text-sm transition-all flex items-center justify-center gap-2"
+                      >
+                        {isAssigning ? (
+                          <><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> Analyzing...</>
+                        ) : (
+                          <><Sparkles className="w-4 h-4" /> Auto-Assign Bed & Team</>
+                        )}
+                      </button>
                     )}
                   </div>
                 </div>
+              </div>
+            )}
 
-                {/* Image Preview */}
-                {selectedAlert.imageUrl && (
+            {detailTab === 'summary' && (
+              <div className="grid grid-cols-2 gap-6">
+                <div className="space-y-6">
                   <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
-                    <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
-                      <ImageIcon className="w-4 h-4 text-blue-500" /> Attached Field Data
-                    </h3>
-                    <div className="aspect-video rounded-xl overflow-hidden bg-slate-100 border border-slate-200">
-                      <img src={selectedAlert.imageUrl} className="w-full h-full object-contain" alt="ECG / Field Photo" />
-                    </div>
-                  </div>
-                )}
-                {(selectedAlert.attachments ?? []).length > 0 && (
-                  <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
-                    <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
-                      <FileText className="w-4 h-4 text-blue-500" /> Attached Reports
-                    </h3>
-                    <div className="space-y-2">
-                      {(selectedAlert.attachments ?? []).map((file, idx) => (
-                        <a
-                          key={`${file.name}-${idx}`}
-                          href={file.dataUrl}
-                          download={file.name}
-                          className="w-full flex items-center gap-2 p-3 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-sm text-slate-700"
-                        >
-                          <FileText className="w-4 h-4 text-blue-500" />
-                          <span className="font-medium truncate">{file.name}</span>
-                        </a>
+                    <h3 className="font-bold text-slate-800 mb-4">Field Treatments</h3>
+                    <div className="flex flex-wrap gap-2">
+                      {selectedAlert.treatments.map((t, idx) => (
+                        <span key={idx} className="bg-blue-50 text-blue-700 px-3 py-1.5 rounded-lg text-sm font-semibold">{t}</span>
                       ))}
+                      {selectedAlert.treatments.length === 0 && <span className="text-slate-400 italic">No treatments reported</span>}
                     </div>
                   </div>
-                )}
-              </div>
-
-              {/* Treatment and Notes */}
-              <div className="space-y-6">
-                <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
-                  <h3 className="font-bold text-slate-800 mb-4">Field Treatments</h3>
-                  <div className="flex flex-wrap gap-2">
-                    {selectedAlert.treatments.map((t, idx) => (
-                      <span key={idx} className="bg-blue-50 text-blue-700 px-3 py-1.5 rounded-lg text-sm font-semibold">
-                        {t}
-                      </span>
-                    ))}
-                    {selectedAlert.treatments.length === 0 && <span className="text-slate-400 italic">No treatments reported</span>}
+                  <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+                    <h3 className="font-bold text-slate-800 mb-2">Paramedic Notes</h3>
+                    <p className="text-slate-600 text-sm leading-relaxed">
+                      {selectedAlert.notes || "No additional notes provided by field team."}
+                    </p>
                   </div>
                 </div>
-
-                <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
-                  <h3 className="font-bold text-slate-800 mb-2">Paramedic Notes</h3>
-                  <p className="text-slate-600 text-sm leading-relaxed">
-                    {selectedAlert.notes || "No additional notes provided by field team."}
-                  </p>
-                </div>
-                <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
-                  <h3 className="font-bold text-slate-800 mb-2">Case Data Received</h3>
-                  <div className="text-sm text-slate-600 space-y-1">
-                    <p><span className="font-semibold text-slate-700">Emergency Type:</span> {selectedAlert.type}</p>
-                    <p><span className="font-semibold text-slate-700">ETA:</span> {selectedAlert.eta} min</p>
-                    <p><span className="font-semibold text-slate-700">Details Field:</span> {selectedAlert.notes ? 'Provided' : 'Not provided'}</p>
-                    <p><span className="font-semibold text-slate-700">Image:</span> {selectedAlert.imageUrl ? 'Attached' : 'Not attached'}</p>
-                    <p><span className="font-semibold text-slate-700">Reports:</span> {(selectedAlert.attachments ?? []).length}</p>
+                <div className="space-y-6">
+                  {/* Allergies */}
+                  <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+                    <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2">
+                      <AlertTriangle className="w-4 h-4 text-amber-500" /> Allergies
+                    </h3>
+                    <div className="flex flex-wrap gap-2">
+                      {(selectedAlert.allergies || []).length > 0 ? (
+                        (selectedAlert.allergies || []).map((a, idx) => (
+                          <span key={idx} className="bg-amber-50 text-amber-700 px-3 py-1 rounded-full text-sm font-semibold border border-amber-200">{a}</span>
+                        ))
+                      ) : (
+                        <span className="text-slate-400 italic text-sm">None reported</span>
+                      )}
+                    </div>
+                  </div>
+                  {/* Known Conditions */}
+                  <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+                    <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2">
+                      <AlertCircle className="w-4 h-4 text-purple-500" /> Known Conditions
+                    </h3>
+                    <div className="flex flex-wrap gap-2">
+                      {(selectedAlert.knownConditions || []).length > 0 ? (
+                        (selectedAlert.knownConditions || []).map((c, idx) => (
+                          <span key={idx} className="bg-purple-50 text-purple-700 px-3 py-1 rounded-full text-sm font-semibold border border-purple-200">{c}</span>
+                        ))
+                      ) : (
+                        <span className="text-slate-400 italic text-sm">None reported</span>
+                      )}
+                    </div>
+                  </div>
+                  {/* Case Data */}
+                  <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+                    <h3 className="font-bold text-slate-800 mb-2">Case Data Received</h3>
+                    <div className="text-sm text-slate-600 space-y-1">
+                      <p><span className="font-semibold text-slate-700">Emergency Type:</span> {selectedAlert.type}</p>
+                      <p><span className="font-semibold text-slate-700">ETA:</span> {selectedAlert.eta} min</p>
+                      <p><span className="font-semibold text-slate-700">Details Field:</span> {selectedAlert.notes ? 'Provided' : 'Not provided'}</p>
+                      <p><span className="font-semibold text-slate-700">Image:</span> {selectedAlert.imageUrl ? 'Attached' : 'Not attached'}</p>
+                      <p><span className="font-semibold text-slate-700">Reports:</span> {(selectedAlert.attachments ?? []).length}</p>
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
+            )}
+
+            {/* Feature 21: Timeline */}
+            {detailTab === 'timeline' && (
+              <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm max-w-2xl">
+                <h3 className="font-bold text-slate-800 mb-6 flex items-center gap-2">
+                  <Clock className="w-5 h-5 text-blue-500" /> Case Timeline
+                </h3>
+                <div className="space-y-4">
+                  {/* Always show created event */}
+                  <div className="flex gap-4">
+                    <div className="flex flex-col items-center">
+                      <div className="w-3 h-3 rounded-full bg-blue-500" />
+                      <div className="flex-1 w-0.5 bg-slate-200 mt-1" />
+                    </div>
+                    <div className="pb-4">
+                      <p className="text-sm font-bold text-slate-800">Alert created</p>
+                      <p className="text-xs text-slate-400">{new Date(selectedAlert.timestamp).toLocaleString()}</p>
+                    </div>
+                  </div>
+                  {/* Vitals entries */}
+                  {(selectedAlert.vitals || []).map((v, idx) => (
+                    <div key={`vitals-${idx}`} className="flex gap-4">
+                      <div className="flex flex-col items-center">
+                        <div className="w-3 h-3 rounded-full bg-emerald-500" />
+                        <div className="flex-1 w-0.5 bg-slate-200 mt-1" />
+                      </div>
+                      <div className="pb-4">
+                        <p className="text-sm font-bold text-slate-800">Vitals recorded</p>
+                        <p className="text-xs text-slate-500">HR: {v.heartRate} · BP: {v.bloodPressure} · SpO2: {v.spo2}</p>
+                        <p className="text-xs text-slate-400">{v.capturedAt ? new Date(v.capturedAt).toLocaleTimeString() : v.timestamp}</p>
+                      </div>
+                    </div>
+                  ))}
+                  {/* Timeline entries from alert */}
+                  {(selectedAlert.timeline || []).map((entry, idx) => (
+                    <div key={`tl-${idx}`} className="flex gap-4">
+                      <div className="flex flex-col items-center">
+                        <div className="w-3 h-3 rounded-full bg-purple-500" />
+                        {idx < (selectedAlert.timeline?.length ?? 0) - 1 && <div className="flex-1 w-0.5 bg-slate-200 mt-1" />}
+                      </div>
+                      <div className="pb-4">
+                        <p className="text-sm font-bold text-slate-800">{entry.action}</p>
+                        <p className="text-xs text-slate-400">{entry.actor} · {new Date(entry.timestamp).toLocaleString()}</p>
+                      </div>
+                    </div>
+                  ))}
+                  {/* Status event */}
+                  {selectedAlert.status !== 'Incoming' && (
+                    <div className="flex gap-4">
+                      <div className="flex flex-col items-center">
+                        <div className={`w-3 h-3 rounded-full ${selectedAlert.status === 'Handed Over' ? 'bg-emerald-600' : 'bg-amber-500'}`} />
+                      </div>
+                      <div>
+                        <p className="text-sm font-bold text-slate-800">Status: {selectedAlert.status}</p>
+                        <p className="text-xs text-slate-400">Updated by hospital staff</p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center text-slate-400 p-8">
