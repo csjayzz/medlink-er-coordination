@@ -1,32 +1,25 @@
 import React, { useState } from 'react';
-import { Shield, Building2, Mail, Lock, AlertCircle } from 'lucide-react';
+import { Shield, Building2, Mail, Lock, AlertCircle, Loader2 } from 'lucide-react';
+import { useAuth, AppRole } from '../context/AuthContext';
 
-type LoginRole = 'MEDIC' | 'HOSPITAL';
-
-interface LoginPageProps {
-  onLogin: (role: 'MEDIC' | 'HOSPITAL', medic?: { id: string; name: string; unit?: string; certification?: string }) => void;
-}
-
-const DEMO_MEDICS: Record<string, { id: string; name: string; unit: string; certification: string }> = {
-  'medic1@medlink.demo': { id: 'MED-9921', name: 'Sarah Jenkins', unit: 'Medic 42 / Rescue 1', certification: 'Paramedic (FP-C)' },
-  'medic2@medlink.demo': { id: 'MED-8842', name: 'Alex Rivera', unit: 'Medic 12', certification: 'EMT-P' },
-};
-
-export default function LoginPage({ onLogin }: LoginPageProps) {
-  const [role, setRole] = useState<LoginRole>('MEDIC');
+export default function LoginPage() {
+  const { login, demoLogin, loading } = useAuth();
+  const [role, setRole] = useState<AppRole>('MEDIC');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [forgotSent, setForgotSent] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [mode, setMode] = useState<'firebase' | 'demo'>('demo'); // Default to demo until Firebase is configured
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
     const trimmedEmail = email.trim().toLowerCase();
     const trimmedPassword = password.trim();
 
     if (!trimmedEmail) {
-      setError('Please enter your email or username.');
+      setError('Please enter your email.');
       return;
     }
     if (!trimmedPassword) {
@@ -34,21 +27,39 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
       return;
     }
 
-    if (role === 'MEDIC') {
-      const demo = DEMO_MEDICS[trimmedEmail];
-      if (demo) {
-        onLogin('MEDIC', demo);
-      } else {
-        const name = trimmedEmail.split('@')[0].replace(/[._]/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) || 'Field Medic';
-        onLogin('MEDIC', {
+    if (mode === 'demo') {
+      // Demo mode: no Firebase needed
+      const name = trimmedEmail.split('@')[0].replace(/[._]/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) || 'Field Medic';
+      if (role === 'MEDIC') {
+        demoLogin('MEDIC', {
           id: `MED-${Date.now().toString(36).slice(-4).toUpperCase()}`,
           name,
           unit: 'Field Unit',
           certification: 'Paramedic',
         });
+      } else {
+        demoLogin('HOSPITAL');
       }
-    } else {
-      onLogin('HOSPITAL');
+      return;
+    }
+
+    // Firebase mode
+    setIsSubmitting(true);
+    try {
+      await login(trimmedEmail, trimmedPassword, role);
+    } catch (err: any) {
+      const code = err?.code || '';
+      if (code === 'auth/user-not-found' || code === 'auth/wrong-password' || code === 'auth/invalid-credential') {
+        setError('Invalid email or password.');
+      } else if (code === 'auth/too-many-requests') {
+        setError('Too many attempts. Please try again later.');
+      } else if (code === 'auth/invalid-email') {
+        setError('Invalid email format.');
+      } else {
+        setError(err?.message || 'Login failed. Check your credentials.');
+      }
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -66,8 +77,6 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
   return (
     <div className="relative min-h-screen bg-gradient-to-br from-slate-50 via-white to-blue-50 flex items-center justify-center p-4 sm:p-6 overflow-hidden">
       <div className="absolute inset-0 z-0">
-        {/* Spline scene commented out due to 403 error. Waiting for valid public URL. */}
-        {/* <Spline scene="https://prod.spline.design/67f56854-67d0-4779-b5ed-371c2f5d169e/scene.splinecode" /> */}
         <div className="w-full h-full bg-slate-50 opacity-50"></div>
       </div>
       <div className="w-full max-w-md relative z-10">
@@ -114,20 +123,20 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
               </div>
             </div>
 
-            {/* Email / Username */}
+            {/* Email */}
             <div>
               <label htmlFor="email" className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">
-                Email or username
+                Email
               </label>
               <div className="relative">
                 <Mail className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
                 <input
                   id="email"
-                  type="text"
+                  type="email"
                   autoComplete="username email"
                   value={email}
                   onChange={e => setEmail(e.target.value)}
-                  placeholder={role === 'MEDIC' ? 'e.g. medic1@medlink.demo' : 'e.g. admin@hospital.demo'}
+                  placeholder="you@medlink.com"
                   className="w-full pl-12 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
                 />
               </div>
@@ -167,23 +176,36 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
 
             <button
               type="submit"
-              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3.5 px-4 rounded-xl shadow-lg shadow-blue-600/25 hover:shadow-blue-600/30 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-all active:scale-[0.99]"
+              disabled={isSubmitting || loading}
+              className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white font-semibold py-3.5 px-4 rounded-xl shadow-lg shadow-blue-600/25 hover:shadow-blue-600/30 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-all active:scale-[0.99] flex items-center justify-center gap-2"
             >
-              Log in
+              {isSubmitting ? <Loader2 className="w-5 h-5 animate-spin" /> : null}
+              {isSubmitting ? 'Signing in...' : 'Log in'}
             </button>
 
-            <button
-              type="button"
-              onClick={handleForgotPassword}
-              className="w-full text-slate-500 hover:text-blue-600 text-sm font-medium transition-colors"
-            >
-              Forgot password?
-            </button>
+            <div className="flex items-center justify-between">
+              <button
+                type="button"
+                onClick={handleForgotPassword}
+                className="text-slate-500 hover:text-blue-600 text-sm font-medium transition-colors"
+              >
+                Forgot password?
+              </button>
+              <button
+                type="button"
+                onClick={() => setMode(mode === 'demo' ? 'firebase' : 'demo')}
+                className="text-xs text-slate-400 hover:text-blue-600 font-medium transition-colors"
+              >
+                {mode === 'demo' ? 'Use Firebase Auth' : 'Use Demo Mode'}
+              </button>
+            </div>
           </form>
         </div>
 
         <p className="text-center text-slate-400 text-xs mt-6">
-          Demo: use any email/password. Medic demo accounts: medic1@medlink.demo, medic2@medlink.demo
+          {mode === 'demo'
+            ? 'Demo mode: use any email/password to log in without Firebase.'
+            : 'Firebase mode: requires a configured Firebase project with Auth enabled.'}
         </p>
       </div>
     </div>
