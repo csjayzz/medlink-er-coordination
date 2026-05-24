@@ -113,17 +113,4 @@ If you want Hosting, Firestore, and Cloud Functions:
 
 Note: Cloud Functions deployment may require the Firebase project to be on the Blaze plan.
 
-## Current Scope
-
-This project is best presented as a prototype or MVP, not a production-grade clinical system.
-
-It works well for:
-
-- portfolio demos
-- resume discussion
-- architecture walkthroughs
-- showing product and engineering breadth
-
-It still needs more work before real-world healthcare deployment, especially around hardened role management, secret rotation, and production-grade security controls.
-
 
