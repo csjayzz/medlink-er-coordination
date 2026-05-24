@@ -12,6 +12,7 @@ import {
   subscribeToMedicAlerts,
   updateAlertInFirestore,
 } from './lib/storage';
+import { isFirebaseConfigured } from './lib/firebase';
 import { Activity, LogOut } from 'lucide-react';
 
 const ETA_TICK_INTERVAL_MS = 60000; // 60 seconds — real-time tick
@@ -21,22 +22,33 @@ function AppContent() {
   const [alerts, setAlerts] = useState<PreArrivalAlert[]>(() => loadAlerts());
   const [etaSeconds, setEtaSeconds] = useState<Record<string, number>>({});
 
+  // Persist alerts to localStorage in demo mode (no Firebase)
   useEffect(() => {
-    if (firebaseUser) return;
+    if (firebaseUser) return; // Firebase mode — Firestore handles persistence
     saveAlerts(alerts);
   }, [alerts, firebaseUser]);
 
+  // Subscribe to alerts from Firestore (Firebase mode) or load from localStorage (demo mode)
   useEffect(() => {
-    if (!auth || !firebaseUser) {
-      setAlerts(loadAlerts());
+    if (!auth) {
+      setAlerts([]);
       return;
     }
 
-    if (auth.role === 'MEDIC' && medicProfile) {
-      return subscribeToMedicAlerts(medicProfile.id, setAlerts);
+    // Firebase mode: subscribe to Firestore
+    if (isFirebaseConfigured && firebaseUser) {
+      if (auth.role === 'MEDIC' && medicProfile) {
+        return subscribeToMedicAlerts(medicProfile.id, setAlerts);
+      }
+      return subscribeToHospitalAlerts(setAlerts);
     }
 
-    return subscribeToHospitalAlerts(setAlerts);
+    // Demo mode: load from localStorage
+    // Don't reset alerts if we already have them in state (e.g. created this session)
+    const persisted = loadAlerts();
+    if (persisted.length > 0) {
+      setAlerts(persisted);
+    }
   }, [auth, firebaseUser, medicProfile]);
 
   // Initialize etaSeconds for new alerts
@@ -91,16 +103,15 @@ function AppContent() {
 
   const addAlert = useCallback((newAlert: PreArrivalAlert) => {
     setAlerts(prev => [newAlert, ...prev]);
-    if (firebaseUser) {
+    if (isFirebaseConfigured && firebaseUser) {
       void createAlertInFirestore(newAlert);
-      return;
     }
-    saveAlerts([newAlert, ...loadAlerts()]);
+    // localStorage persistence handled by the effect above for demo mode
   }, [firebaseUser]);
 
   const updateAlert = useCallback((alertId: string, updates: Partial<PreArrivalAlert>) => {
     setAlerts(prev => prev.map(a => a.id === alertId ? { ...a, ...updates } : a));
-    if (firebaseUser) {
+    if (isFirebaseConfigured && firebaseUser) {
       void updateAlertInFirestore(alertId, updates);
     }
   }, [firebaseUser]);
