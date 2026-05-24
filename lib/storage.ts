@@ -10,6 +10,7 @@ import {
   where,
 } from 'firebase/firestore';
 import { db } from './firebase';
+import { encryptAlertPHI, decryptAlertPHI } from './crypto';
 import type { PreArrivalAlert } from '../types';
 
 const ALERTS_COLLECTION = 'medlinkAlerts';
@@ -18,19 +19,17 @@ const ALERTS_KEY = 'medlink_alerts';
 // ── Firestore helpers ────────────────────────────────────────
 
 /**
- * Write a new alert to Firestore.
+ * Write a new alert to Firestore — encrypts PHI fields before write.
  * Called by the medic on transmit.
  */
 export async function createAlertInFirestore(alert: PreArrivalAlert): Promise<string> {
   try {
-    await setDoc(doc(db, ALERTS_COLLECTION, alert.id), {
-      ...alert,
-      transmittedAt: Date.now(),
-    });
+    const encrypted = await encryptAlertPHI({ ...alert, transmittedAt: Date.now() });
+    await setDoc(doc(db, ALERTS_COLLECTION, alert.id), encrypted);
     return alert.id;
   } catch (err) {
     console.warn('Firestore createAlert failed, falling back to localStorage', err);
-    // Fallback: save to localStorage
+    // Fallback: save to localStorage (unencrypted — local only, no network exposure)
     const existing = loadAlerts();
     saveAlerts([alert, ...existing]);
     return alert.id;
@@ -39,11 +38,16 @@ export async function createAlertInFirestore(alert: PreArrivalAlert): Promise<st
 
 /**
  * Update an existing alert in Firestore.
+ * Re-encrypts any PHI fields in the update payload.
  */
 export async function updateAlertInFirestore(alertId: string, updates: Partial<PreArrivalAlert>): Promise<void> {
   try {
+    // Only encrypt if the update contains PHI fields
+    const phiFields = ['patientName', 'patientAge', 'notes', 'treatments', 'allergies', 'vitals'];
+    const hasPHI = Object.keys(updates).some(k => phiFields.includes(k));
+    const payload = hasPHI ? await encryptAlertPHI(updates as Record<string, any>) : updates;
     const docRef = doc(db, ALERTS_COLLECTION, alertId);
-    await updateDoc(docRef, updates as any);
+    await updateDoc(docRef, payload as any);
   } catch (err) {
     console.warn('Firestore updateAlert failed', err);
   }
@@ -51,7 +55,7 @@ export async function updateAlertInFirestore(alertId: string, updates: Partial<P
 
 /**
  * Subscribe to alerts filtered for a medic (by medicId).
- * Feature 6, instruction D: role-split subscriptions.
+ * Decrypts PHI fields after reading from Firestore.
  */
 export function subscribeToMedicAlerts(
   medicId: string,
@@ -63,12 +67,16 @@ export function subscribeToMedicAlerts(
       where('medicId', '==', medicId),
       orderBy('transmittedAt', 'desc')
     );
-    return onSnapshot(q, (snapshot) => {
-      const alerts: PreArrivalAlert[] = snapshot.docs.map(doc => ({
+    return onSnapshot(q, async (snapshot) => {
+      const rawDocs = snapshot.docs.map(doc => ({
         ...doc.data(),
         id: doc.id,
-      } as PreArrivalAlert));
-      onUpdate(alerts);
+      }));
+      // Decrypt all PHI fields
+      const alerts = await Promise.all(
+        rawDocs.map(d => decryptAlertPHI(d).catch(() => d as any))
+      );
+      onUpdate(alerts as PreArrivalAlert[]);
     }, (err) => {
       console.warn('Firestore medic subscription error, using localStorage fallback', err);
       onUpdate(loadAlerts().filter(a => a.medicId === medicId));
@@ -82,7 +90,7 @@ export function subscribeToMedicAlerts(
 
 /**
  * Subscribe to ALL alerts for hospital dashboard.
- * Feature 6, instruction D: role-split subscriptions.
+ * Decrypts PHI fields after reading from Firestore.
  */
 export function subscribeToHospitalAlerts(
   onUpdate: (alerts: PreArrivalAlert[]) => void
@@ -92,12 +100,16 @@ export function subscribeToHospitalAlerts(
       collection(db, ALERTS_COLLECTION),
       orderBy('transmittedAt', 'desc')
     );
-    return onSnapshot(q, (snapshot) => {
-      const alerts: PreArrivalAlert[] = snapshot.docs.map(doc => ({
+    return onSnapshot(q, async (snapshot) => {
+      const rawDocs = snapshot.docs.map(doc => ({
         ...doc.data(),
         id: doc.id,
-      } as PreArrivalAlert));
-      onUpdate(alerts);
+      }));
+      // Decrypt all PHI fields
+      const alerts = await Promise.all(
+        rawDocs.map(d => decryptAlertPHI(d).catch(() => d as any))
+      );
+      onUpdate(alerts as PreArrivalAlert[]);
     }, (err) => {
       console.warn('Firestore hospital subscription error, using localStorage fallback', err);
       onUpdate(loadAlerts());
