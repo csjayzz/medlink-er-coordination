@@ -17,6 +17,7 @@ import {
   VoiceMode
 } from '../services/geminiService';
 import { HOSPITAL_CONFIG } from '../lib/hospitalConfig';
+import { logAuditEvent } from '../lib/auditLog';
 
 type ViewMode = 'DASH' | 'PROFILE' | 'CREATE_ALERT' | 'VOICE_AGENT' | 'ALERT_DETAIL' | 'ALERT_EDIT';
 
@@ -41,6 +42,8 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
   
   // Feature 18: voice mode selection
   const [voiceMode, setVoiceMode] = useState<VoiceMode>('scribe');
+  // Fix 11: Language selector
+  const [selectedLanguage, setSelectedLanguage] = useState('en-US');
   const [showModeSelector, setShowModeSelector] = useState(false);
   
   // Feature 19: call hospital banner
@@ -93,6 +96,8 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
   const formDataRef = useRef<Partial<PreArrivalAlert>>(formData);
   const agentResponseRef = useRef<string>('');
   const speechRecognitionRef = useRef<{ stop: () => void } | null>(null);
+  // Fix 3: Recovery context — serialized form state from previous session
+  const recoveryContextRef = useRef<string>('');
 
   useEffect(() => {
     formDataRef.current = formData;
@@ -106,6 +111,14 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
     return () => {
       stopLiveSession();
     };
+  }, []);
+
+  // Fix 6: Request mic permission at mount so it's not blocking at session start
+  useEffect(() => {
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+      // Pre-warm mic — stop tracks immediately, we just want the permission prompt early
+      stream.getTracks().forEach(t => t.stop());
+    }).catch(() => { /* user denied or no mic — will fail gracefully at session start */ });
   }, []);
 
   useEffect(() => {
@@ -219,6 +232,15 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
       setAgentResponse("Requesting Microphone...");
       streamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
 
+      // Fix 6+7: Pre-load AudioWorklet module BEFORE connecting to Live API
+      // Fix 7: Use .ts extension for Vite dev, Vite handles compilation for production
+      try {
+        const workletUrl = new URL('../services/pcmWorklet.ts', import.meta.url).href;
+        await audioContextRef.current!.audioWorklet.addModule(workletUrl);
+      } catch (e) {
+        console.warn('AudioWorklet module load failed, falling back', e);
+      }
+
       setAgentResponse("Connecting to Command Center...");
       const ai = new GoogleGenAI({ apiKey });
 
@@ -228,6 +250,20 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
           onopen: async () => {
             setIsLiveConnected(true);
             setAgentResponse("Agent Ready. Describe the case...");
+
+            // Fix 3: Inject recovery context into new session if reconnecting
+            if (recoveryContextRef.current) {
+              try {
+                const session = await sessionPromise;
+                session.sendClientContent({ turns: [{
+                  role: 'user',
+                  parts: [{ text: `Session restored. Here is what was captured before disconnect: ${recoveryContextRef.current}. Continue from where we left off.` }]
+                }] });
+                recoveryContextRef.current = ''; // Clear after injection
+              } catch (e) {
+                console.warn('Failed to inject recovery context', e);
+              }
+            }
 
             // Live transcription of user speech via Web Speech API (browser)
             const SpeechRecognitionAPI = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -251,25 +287,27 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
               } catch (_) {}
             }
 
-            // AudioWorkletNode — replaces deprecated createScriptProcessor
-            const workletUrl = new URL('../services/pcmWorklet.ts', import.meta.url).href;
-            await audioContextRef.current!.audioWorklet.addModule(workletUrl);
-            const source = audioContextRef.current!.createMediaStreamSource(streamRef.current!);
-            const workletNode = new AudioWorkletNode(audioContextRef.current!, 'pcm-processor');
-            
-            workletNode.port.onmessage = (event) => {
-              const int16Buffer = event.data as ArrayBuffer;
-              const pcmBlob = {
-                data: encodePCM(new Uint8Array(int16Buffer)),
-                mimeType: 'audio/pcm;rate=16000',
+            // AudioWorkletNode — already loaded before connect (Fix 6)
+            try {
+              const source = audioContextRef.current!.createMediaStreamSource(streamRef.current!);
+              const workletNode = new AudioWorkletNode(audioContextRef.current!, 'pcm-processor');
+              
+              workletNode.port.onmessage = (event) => {
+                const int16Buffer = event.data as ArrayBuffer;
+                const pcmBlob = {
+                  data: encodePCM(new Uint8Array(int16Buffer)),
+                  mimeType: 'audio/pcm;rate=16000',
+                };
+                sessionPromise.then(session => {
+                  if (session) session.sendRealtimeInput({ media: pcmBlob });
+                }).catch(() => {});
               };
-              sessionPromise.then(session => {
-                if (session) session.sendRealtimeInput({ media: pcmBlob });
-              }).catch(() => {});
-            };
-            
-            source.connect(workletNode);
-            workletNode.connect(audioContextRef.current!.destination);
+              
+              source.connect(workletNode);
+              workletNode.connect(audioContextRef.current!.destination);
+            } catch (workletErr) {
+              console.warn('AudioWorklet setup failed in onopen', workletErr);
+            }
           },
           onmessage: async (message: LiveServerMessage) => {
             const sc = message.serverContent;
@@ -307,14 +345,20 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
               setTranscript(prev => (prev + " " + String(inputTrans).trim()).trim());
             }
 
-            // --- Agent response: only the agent's actual speech (outputTranscription only; do not use modelTurn text which includes reasoning) ---
+            // --- Agent response: check modelTurn.parts text first (Fix 5), then outputTranscription fallback chain ---
+            const modelTurnText = sc?.modelTurn?.parts
+              ?.filter((p: any) => p.text && !p.inlineData)
+              ?.map((p: any) => p.text)
+              ?.join(' ');
+
             const outputTrans =
-              (scAny?.outputTranscription as { text?: string; content?: string } | undefined)?.text
-              ?? (scAny?.outputTranscription as { text?: string; content?: string } | undefined)?.content
-              ?? (scAny?.output_transcription as { text?: string; content?: string } | undefined)?.text
-              ?? (scAny?.output_transcription as { text?: string; content?: string } | undefined)?.content
-              ?? (msgAny?.outputTranscription as { text?: string } | undefined)?.text
-              ?? (msgAny?.output_transcription as { text?: string } | undefined)?.text;
+              modelTurnText?.trim()
+              || (scAny?.outputTranscription as { text?: string; content?: string } | undefined)?.text
+              || (scAny?.outputTranscription as { text?: string; content?: string } | undefined)?.content
+              || (scAny?.output_transcription as { text?: string; content?: string } | undefined)?.text
+              || (scAny?.output_transcription as { text?: string; content?: string } | undefined)?.content
+              || (msgAny?.outputTranscription as { text?: string } | undefined)?.text
+              || (msgAny?.output_transcription as { text?: string } | undefined)?.text;
             if (outputTrans && String(outputTrans).trim()) {
               setAgentResponse(String(outputTrans).trim());
               agentResponseRef.current = String(outputTrans).trim();
@@ -416,13 +460,14 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
               current.notes ? `Notes: ${current.notes}` : null,
             ].filter(Boolean).join(' | ');
             if (summary) {
+              recoveryContextRef.current = summary; // Store for injection on reconnect
               setAgentResponse(`Disconnected. Reconnecting with context: ${summary}`);
             }
           }
         },
         config: {
           responseModalities: [Modality.AUDIO],
-          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } },
+          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } }, languageCode: selectedLanguage },
           systemInstruction: { parts: [{ text: getSystemInstruction(voiceMode) }] },
           tools: SCRIBE_TOOLS as any,
           // Request transcription in messages (supported by Live API; types may not include these)
@@ -484,6 +529,8 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
     };
     onNewAlert(finalData);
     setLastCreatedAlertId(finalData.id);
+    // Fix 4: Audit log — alert transmitted
+    logAuditEvent(medic.id, 'alert_created', finalData.id, 'medic', { type: finalData.type, severity: finalData.severity });
     setToast("Alert transmitted successfully. It is now visible in your Field Alert History.");
     setTimeout(() => setToast(null), 5000);
     setIsCreatingAlert(false);
@@ -765,24 +812,32 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
         </div>
 
         <div className="px-6 pb-8 space-y-6">
-          <div className="grid grid-cols-2 gap-4">
-            <div className="bg-white/5 border border-white/10 rounded-3xl p-5 relative group">
-               <div className="absolute top-4 right-4 text-emerald-500"><CheckCircle className="w-4 h-4" /></div>
-               <p className="text-[10px] font-black text-white/30 uppercase mb-3 tracking-widest">PATIENT AGE</p>
-               <div className="flex items-center gap-3">
-                  <User className="w-5 h-5 text-white/20" />
-                  <p className="text-3xl font-black text-white">{formData.patientAge || '---'}</p>
-               </div>
-            </div>
-            <div className="bg-white/5 border border-white/10 rounded-3xl p-5 relative group">
-               <div className="absolute top-4 right-4 text-blue-500"><Activity className="w-4 h-4" /></div>
-               <p className="text-[10px] font-black text-white/30 uppercase mb-3 tracking-widest">BP (MMHG)</p>
-               <div className="flex items-center gap-3">
-                  <Activity className="w-5 h-5 text-white/20" />
-                  <p className="text-3xl font-black text-white">{(formData.vitals && formData.vitals.length > 0) ? formData.vitals[formData.vitals.length - 1].bloodPressure || '---' : '---'}</p>
-               </div>
-            </div>
-          </div>
+          {/* Fix 13: 6-card live data grid */}
+          {(() => {
+            const lv = (formData.vitals && formData.vitals.length > 0) ? formData.vitals[formData.vitals.length - 1] : null;
+            const cards = [
+              { label: 'PATIENT', value: formData.patientName || '---', icon: <User className="w-4 h-4" />, color: 'text-blue-400' },
+              { label: 'SEVERITY', value: formData.severity || '---', icon: <AlertTriangle className="w-4 h-4" />, color: formData.severity === 'Critical' ? 'text-red-400' : formData.severity === 'Serious' ? 'text-amber-400' : 'text-emerald-400' },
+              { label: 'TYPE', value: formData.type || '---', icon: <Shield className="w-4 h-4" />, color: 'text-purple-400' },
+              { label: 'HEART RATE', value: lv?.heartRate || '---', icon: <Activity className="w-4 h-4" />, color: (lv?.heartRate && Number(lv.heartRate) > 100) ? 'text-red-400' : 'text-emerald-400', unit: 'BPM' },
+              { label: 'BLOOD PRESSURE', value: lv?.bloodPressure || '---', icon: <Activity className="w-4 h-4" />, color: 'text-blue-400', unit: 'mmHg' },
+              { label: 'SPO2', value: lv?.spo2 ? `${lv.spo2}%` : '---', icon: <Activity className="w-4 h-4" />, color: (lv?.spo2 && Number(lv.spo2) < 92) ? 'text-red-400' : 'text-emerald-400' },
+            ];
+            return (
+              <div className="grid grid-cols-3 gap-3">
+                {cards.map((c, i) => (
+                  <div key={i} className="bg-white/5 border border-white/10 rounded-2xl p-4 relative">
+                    <div className={`absolute top-3 right-3 ${c.color} opacity-60`}>{c.icon}</div>
+                    <p className="text-[9px] font-black text-white/30 uppercase mb-2 tracking-widest">{c.label}</p>
+                    <p className={`text-xl font-black text-white truncate ${c.value === '---' ? 'opacity-30' : ''}`}>
+                      {c.value}
+                      {c.unit && c.value !== '---' && <span className="text-[10px] text-white/30 ml-1 font-bold">{c.unit}</span>}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
 
           <div className="space-y-4 pt-4">
              <button 
@@ -1185,7 +1240,7 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
           </div>
         </div>
 
-        {/* Feature 18: Voice Mode Selector */}
+        {/* Feature 18: Voice Mode Selector + Fix 11: Language Selector */}
         <div className="fixed bottom-[100px] left-0 w-full bg-white/95 backdrop-blur-sm border-t border-slate-100 px-6 py-3 z-40">
           <div className="max-w-2xl mx-auto">
             <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-2">Voice Agent Mode</p>
@@ -1206,6 +1261,29 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
                 >
                   <p className={`text-xs font-bold ${voiceMode === m.key ? 'text-blue-600' : 'text-slate-700'}`}>{m.label}</p>
                   <p className="text-[10px] text-slate-400">{m.desc}</p>
+                </button>
+              ))}
+            </div>
+            {/* Fix 11: Language selector */}
+            <div className="flex items-center gap-2 mt-2">
+              <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest mr-1">Lang</span>
+              {([
+                { code: 'en-US', label: 'English' },
+                { code: 'hi-IN', label: 'Hindi' },
+                { code: 'mr-IN', label: 'Marathi' },
+                { code: 'te-IN', label: 'Telugu' },
+                { code: 'ta-IN', label: 'Tamil' },
+              ]).map(lang => (
+                <button
+                  key={lang.code}
+                  onClick={() => setSelectedLanguage(lang.code)}
+                  className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all ${
+                    selectedLanguage === lang.code
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
+                  }`}
+                >
+                  {lang.label}
                 </button>
               ))}
             </div>
@@ -1383,25 +1461,104 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
             </div>
           </div>
         ) : (
-          <div className="space-y-8 animate-in fade-in slide-in-from-bottom-8 duration-700">
-            <div className="bg-white p-12 rounded-[56px] border border-slate-100 shadow-sm text-center relative overflow-hidden">
-              <div className="absolute top-0 left-0 w-full h-36 bg-slate-900 z-0"></div>
-              <div className="w-32 h-32 bg-white rounded-[40px] mx-auto mb-8 flex items-center justify-center border-[8px] border-[#f8fafc] shadow-2xl relative z-10">
-                <User className="w-16 h-16 text-slate-200" />
+          <div className="space-y-6 animate-in fade-in slide-in-from-bottom-8 duration-700">
+            {/* Compact profile card */}
+            <div className="bg-white p-8 rounded-[40px] border border-slate-100 shadow-sm text-center relative overflow-hidden">
+              <div className="absolute top-0 left-0 w-full h-24 bg-slate-900 z-0"></div>
+              <div className="w-20 h-20 bg-white rounded-[28px] mx-auto mb-4 flex items-center justify-center border-[6px] border-[#f8fafc] shadow-2xl relative z-10">
+                <User className="w-10 h-10 text-slate-200" />
               </div>
-              <h2 className="text-3xl font-black text-slate-900 relative z-10">{medic.name}</h2>
-              <p className="text-blue-600 font-black text-[11px] uppercase tracking-[0.3em] relative z-10 mt-2">{medic.certification}</p>
-              
-              <div className="grid grid-cols-2 gap-5 mt-14">
-                <div className="bg-slate-50 p-6 rounded-[32px] text-left">
-                  <p className="text-[9px] font-black text-slate-400 uppercase mb-2">Badge Number</p>
-                  <p className="font-black text-slate-800 text-xl">{medic.id}</p>
+              <h2 className="text-2xl font-black text-slate-900 relative z-10">{medic.name}</h2>
+              <p className="text-blue-600 font-black text-[11px] uppercase tracking-[0.3em] relative z-10 mt-1">
+                {medic.certification}
+              </p>
+              <div className="grid grid-cols-3 gap-3 mt-6">
+                <div className="bg-slate-50 p-4 rounded-2xl text-left">
+                  <p className="text-[9px] font-black text-slate-400 uppercase mb-1">Badge</p>
+                  <p className="font-black text-slate-800 text-sm">{medic.id}</p>
                 </div>
-                <div className="bg-slate-50 p-6 rounded-[32px] text-left">
-                  <p className="text-[9px] font-black text-slate-400 uppercase mb-2">Voice Workflow</p>
-                  <p className="font-black text-slate-800 text-xl">Live Intake</p>
+                <div className="bg-slate-50 p-4 rounded-2xl text-left">
+                  <p className="text-[9px] font-black text-slate-400 uppercase mb-1">Unit</p>
+                  <p className="font-black text-slate-800 text-sm">{medic.unit}</p>
+                </div>
+                <div className="bg-slate-50 p-4 rounded-2xl text-left">
+                  <p className="text-[9px] font-black text-slate-400 uppercase mb-1">Status</p>
+                  <p className="font-black text-emerald-600 text-sm">{medic.dutyStatus}</p>
                 </div>
               </div>
+            </div>
+
+            {/* Alert history on profile */}
+            <div>
+              <div className="flex items-center justify-between px-2 mb-3">
+                <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                  Mission History
+                </h3>
+                <span className="text-[10px] font-black text-slate-400">{alerts.length} Total</span>
+              </div>
+
+              {alerts.length === 0 ? (
+                <div className="bg-white rounded-[32px] border border-dashed border-slate-200 p-12 text-center">
+                  <Clipboard className="w-10 h-10 text-slate-200 mx-auto mb-3" />
+                  <p className="text-slate-400 font-bold text-sm">No missions on record</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {alerts.map(alert => (
+                    <div
+                      key={alert.id}
+                      onClick={() => { setSelectedAlertId(alert.id); setViewMode('ALERT_DETAIL'); setActiveTab('DASH'); }}
+                      className="bg-white p-5 rounded-[24px] border border-slate-100 shadow-sm active:scale-[0.98] transition-all cursor-pointer"
+                    >
+                      <div className="flex justify-between items-start mb-2">
+                        <div className="flex items-center gap-2">
+                          <span className={`text-[10px] font-black px-3 py-1 rounded-full border ${
+                            alert.severity === CaseSeverity.CRITICAL
+                              ? 'bg-red-50 text-red-600 border-red-100'
+                              : alert.severity === CaseSeverity.SERIOUS
+                              ? 'bg-amber-50 text-amber-600 border-amber-100'
+                              : 'bg-emerald-50 text-emerald-600 border-emerald-100'
+                          }`}>
+                            {alert.severity}
+                          </span>
+                          <span className={`text-[10px] font-black px-3 py-1 rounded-full ${
+                            alert.status === 'Incoming'
+                              ? 'bg-blue-50 text-blue-600'
+                              : alert.status === 'Arrived'
+                              ? 'bg-emerald-50 text-emerald-600'
+                              : 'bg-slate-100 text-slate-500'
+                          }`}>
+                            {alert.status}
+                          </span>
+                        </div>
+                        <span className="text-[10px] text-slate-400 font-medium">
+                          {new Date(alert.timestamp).toLocaleDateString([], {
+                            month: 'short', day: 'numeric'
+                          })} · {new Date(alert.timestamp).toLocaleTimeString([], {
+                            hour: '2-digit', minute: '2-digit'
+                          })}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-end">
+                        <div>
+                          <p className="font-black text-slate-900">{alert.patientName}, {alert.patientAge}</p>
+                          <p className="text-[11px] text-slate-400 font-medium mt-0.5">
+                            {alert.type} · {alert.ambulanceUnit}
+                          </p>
+                        </div>
+                        {alert.vitals && alert.vitals.length > 0 && (
+                          <div className="text-right">
+                            <p className="text-[9px] text-slate-400 font-black uppercase">HR</p>
+                            <p className="text-lg font-black text-slate-700">
+                              {alert.vitals[alert.vitals.length - 1].heartRate}
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         )}
