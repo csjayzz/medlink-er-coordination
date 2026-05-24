@@ -2,9 +2,14 @@ import React, { useState, useEffect, useRef } from 'react';
 import { PreArrivalAlert, CaseSeverity, TimelineEntry } from '../types';
 import { Activity, Clock, Shield, Search, AlertTriangle, ArrowUpRight, Bed, Users, Phone, ImageIcon, X, Filter, CheckCircle, AlertCircle, UserCheck, Home, ChevronRight, Stethoscope, FileText, Bell, Printer, ListChecks, Sparkles } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import { HOSPITAL_CONFIG } from '../lib/hospitalConfig';
+import { HOSPITAL_CONFIG, INITIAL_BEDS, DOCTORS, NURSES, BedItem, StaffMember } from '../lib/hospitalConfig';
+import { logAuditEvent } from '../lib/auditLog';
+// Use shared resource data from hospitalConfig
+const mockBeds = INITIAL_BEDS;
+const mockDoctors = DOCTORS;
+const mockNurses = NURSES;
 
-// Additional types for PreAssign functionality
+// Types for PreAssign functionality
 interface Patient {
   id: string;
   name: string;
@@ -15,24 +20,7 @@ interface Patient {
   eta: number;
   status: 'Waiting' | 'Assigned';
   assignedBed?: string;
-  assignedTeam?: {
-    doctor: string;
-    nurse: string;
-  };
-}
-
-interface BedItem {
-  id: string;
-  room: string;
-  type: 'ICU' | 'General' | 'Emergency';
-  status: 'Available' | 'Cleaning' | 'Occupied';
-}
-
-interface StaffMember {
-  id: string;
-  name: string;
-  specialization?: string;
-  available: boolean;
+  assignedTeam?: { doctor: string; nurse: string };
 }
 
 interface Assignment {
@@ -43,42 +31,25 @@ interface Assignment {
   specialInstructions: string[];
 }
 
-// Mock Data for PreAssign
-const initialPatients: Patient[] = [
-  { id: 'P001', name: 'John Anderson', age: 58, gender: 'M', severity: 'Critical', condition: 'Cardiac Arrest', eta: 8, status: 'Waiting' },
-  { id: 'P002', name: 'Sarah Mitchell', age: 34, gender: 'F', severity: 'High', condition: 'Severe Trauma', eta: 12, status: 'Waiting' },
-  { id: 'P003', name: 'Michael Brown', age: 45, gender: 'M', severity: 'Medium', condition: 'Fracture', eta: 18, status: 'Waiting' },
-  { id: 'P004', name: 'Emily Davis', age: 67, gender: 'F', severity: 'Critical', condition: 'Stroke', eta: 6, status: 'Waiting' },
-  { id: 'P005', name: 'Robert Wilson', age: 29, gender: 'M', severity: 'High', condition: 'Respiratory Distress', eta: 15, status: 'Waiting' }
-];
-
-const mockBeds: BedItem[] = [
-  { id: 'B101', room: 'ICU-1', type: 'ICU', status: 'Available' },
-  { id: 'B102', room: 'ICU-2', type: 'ICU', status: 'Occupied' },
-  { id: 'B103', room: 'ICU-3', type: 'ICU', status: 'Available' },
-  { id: 'B201', room: 'ER-1', type: 'Emergency', status: 'Available' },
-  { id: 'B202', room: 'ER-2', type: 'Emergency', status: 'Cleaning' },
-  { id: 'B203', room: 'ER-3', type: 'Emergency', status: 'Available' },
-  { id: 'B301', room: 'GEN-1', type: 'General', status: 'Available' },
-  { id: 'B302', room: 'GEN-2', type: 'General', status: 'Available' },
-  { id: 'B303', room: 'GEN-3', type: 'General', status: 'Occupied' }
-];
-
-const mockDoctors: StaffMember[] = [
-  { id: 'D001', name: 'Dr. Amanda Chen', specialization: 'Cardiology', available: true },
-  { id: 'D002', name: 'Dr. James Parker', specialization: 'Emergency Medicine', available: true },
-  { id: 'D003', name: 'Dr. Lisa Thompson', specialization: 'Neurology', available: true },
-  { id: 'D004', name: 'Dr. Robert Martinez', specialization: 'Orthopedics', available: false },
-  { id: 'D005', name: 'Dr. Sarah Johnson', specialization: 'Trauma Surgery', available: true }
-];
-
-const mockNurses: StaffMember[] = [
-  { id: 'N001', name: 'Nurse Emily Roberts', available: true },
-  { id: 'N002', name: 'Nurse Michael Lee', available: true },
-  { id: 'N003', name: 'Nurse Jennifer White', available: false },
-  { id: 'N004', name: 'Nurse David Brown', available: true },
-  { id: 'N005', name: 'Nurse Maria Garcia', available: true }
-];
+// Map real PreArrivalAlert to Patient shape for the assignment modal
+function alertToPatient(alert: PreArrivalAlert): Patient {
+  const severityMap: Record<string, 'Critical' | 'High' | 'Medium'> = {
+    [CaseSeverity.CRITICAL]: 'Critical',
+    [CaseSeverity.SERIOUS]: 'High',
+    [CaseSeverity.STABLE]: 'Medium',
+  };
+  return {
+    id: alert.id,
+    name: alert.patientName || 'Unknown',
+    age: parseInt(alert.patientAge) || 0,
+    gender: 'M',
+    severity: severityMap[alert.severity] || 'Medium',
+    condition: alert.type || 'Unknown',
+    eta: alert.eta ?? 0,
+    status: alert.assignedBed ? 'Assigned' : 'Waiting',
+    assignedBed: alert.assignedBed,
+  };
+}
 
 // Assignment Modal Component
 const AssignmentModal: React.FC<{
@@ -231,10 +202,11 @@ const AssignmentModal: React.FC<{
   );
 };
 
-// PreAssign Page Component
-const PreAssignBedTeam: React.FC<{ onBack: () => void }> = ({ onBack }) => {
+// PreAssign Page Component — uses real alerts
+const PreAssignBedTeam: React.FC<{ onBack: () => void; alerts: PreArrivalAlert[]; onUpdateAlert: (id: string, updates: Partial<PreArrivalAlert>) => void }> = ({ onBack, alerts: realAlerts, onUpdateAlert }) => {
   const [currentTime, setCurrentTime] = useState<Date>(new Date());
-  const [patients, setPatients] = useState<Patient[]>(initialPatients);
+  // Map real alerts to Patient objects
+  const patients = realAlerts.filter(a => a.status === 'Incoming').map(alertToPatient);
   const [beds, setBeds] = useState<BedItem[]>(mockBeds);
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [severityFilter, setSeverityFilter] = useState<string>('All');
@@ -265,9 +237,19 @@ const PreAssignBedTeam: React.FC<{ onBack: () => void }> = ({ onBack }) => {
     const nurse = mockNurses.find(n => n.id === assignment.nurseId);
     const bed = beds.find(b => b.id === assignment.bedId);
 
-    setPatients(prev => prev.map(p =>
-      p.id === patientId ? { ...p, status: 'Assigned' as const, assignedBed: bed?.room, assignedTeam: { doctor: doctor?.name || '', nurse: nurse?.name || '' } } : p
-    ));
+    // Persist assignment to real alert via Firestore
+    onUpdateAlert(patientId, {
+      assignedBed: bed?.room,
+      assignedDoctor: doctor?.name,
+      assignedNurse: nurse?.name,
+    } as any);
+
+    // Audit: log bed assignment (non-PHI metadata only)
+    logAuditEvent('hospital', 'bed_assigned', patientId, 'hospital', {
+      bed: bed?.room || 'unknown',
+      bedType: bed?.type || 'unknown',
+    });
+
     setBeds(prev => prev.map(b => b.id === assignment.bedId ? { ...b, status: 'Occupied' as const } : b));
     setToastMessage(`Successfully assigned ${bed?.room} to patient`);
     setShowToast(true);
@@ -467,7 +449,9 @@ interface HospitalInterfaceProps {
 const HospitalInterface: React.FC<HospitalInterfaceProps> = ({ alerts, onUpdateAlert, etaSeconds, formatEta, isImminent }) => {
   const [searchFilter, setSearchFilter] = useState('');
   const [selectedAlertId, setSelectedAlertId] = useState<string | null>(() => alerts[0]?.id ?? null);
-  const [currentView, setCurrentView] = useState<'dashboard' | 'preassign'>('dashboard');
+  const [currentView, setCurrentView] = useState<'dashboard' | 'preassign' | 'resources'>('dashboard');
+  // Fix 8: Status filter state — always-visible tabs
+  const [statusFilter, setStatusFilter] = useState<'Incoming' | 'Arrived' | 'Handed Over'>('Incoming');
 
   // Feature 22: prep checklist state — tracks checked items per alert
   const [checklistState, setChecklistState] = useState<Record<string, boolean[]>>({});
@@ -519,8 +503,15 @@ const HospitalInterface: React.FC<HospitalInterfaceProps> = ({ alerts, onUpdateA
     ? (alerts.find(a => a.id === selectedAlertId) ?? null)
     : null;
 
+  // Audit: log alert_viewed when hospital operator opens a case
+  useEffect(() => {
+    if (selectedAlertId) {
+      logAuditEvent('hospital', 'alert_viewed', selectedAlertId, 'hospital');
+    }
+  }, [selectedAlertId]);
+
   const incomingAlerts = alerts
-    .filter(a => a.status === 'Incoming')
+    .filter(a => a.status === statusFilter)
     .filter(a => !searchFilter.trim() || [a.patientName, a.ambulanceUnit, a.medicId].some(s => s?.toLowerCase().includes(searchFilter.toLowerCase())))
     .sort((a, b) => {
       const severityOrder = { [CaseSeverity.CRITICAL]: 0, [CaseSeverity.SERIOUS]: 1, [CaseSeverity.STABLE]: 2 };
@@ -529,6 +520,8 @@ const HospitalInterface: React.FC<HospitalInterfaceProps> = ({ alerts, onUpdateA
 
   const updateStatus = (alertId: string, status: 'Incoming' | 'Arrived' | 'Handed Over') => {
     onUpdateAlert(alertId, { status });
+    // Fix 4: Audit log — status updated
+    logAuditEvent('hospital', 'status_updated', alertId, 'hospital', { newStatus: status });
     if (selectedAlertId === alertId && status !== 'Incoming') {
       setSelectedAlertId(incomingAlerts.find(a => a.id !== alertId)?.id ?? null);
     }
@@ -607,7 +600,88 @@ Respond in VALID JSON only: {"bed":"...", "doctor":"...", "nurseTeam":"...", "re
 
   // If PreAssign view is active, show that instead
   if (currentView === 'preassign') {
-    return <PreAssignBedTeam onBack={() => setCurrentView('dashboard')} />;
+    return <PreAssignBedTeam onBack={() => setCurrentView('dashboard')} alerts={alerts} onUpdateAlert={onUpdateAlert} />;
+  }
+
+  // Fix 15: Hospital Resource Management
+  if (currentView === 'resources') {
+    return (
+      <div className="min-h-screen bg-slate-50 p-8">
+        <div className="max-w-4xl mx-auto">
+          <div className="flex items-center gap-2 text-sm text-slate-400 mb-6">
+            <button onClick={() => setCurrentView('dashboard')} className="flex items-center gap-2 hover:text-slate-800 transition-colors">
+              <Home className="w-4 h-4" /> Dashboard
+            </button>
+            <ChevronRight className="w-4 h-4" />
+            <span className="text-slate-800 font-bold">Manage Resources</span>
+          </div>
+
+          <h1 className="text-2xl font-bold text-slate-800 mb-8">Hospital Resource Management</h1>
+
+          {/* Beds Table */}
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm mb-8 overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center">
+              <h2 className="font-bold text-slate-800 flex items-center gap-2"><Bed className="w-5 h-5 text-blue-600" /> Beds</h2>
+            </div>
+            <table className="w-full">
+              <thead className="bg-slate-50">
+                <tr>
+                  <th className="text-left px-6 py-3 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Room</th>
+                  <th className="text-left px-6 py-3 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Type</th>
+                  <th className="text-left px-6 py-3 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {mockBeds.map(bed => (
+                  <tr key={bed.id} className="border-t border-slate-50 hover:bg-slate-50/50 transition-colors">
+                    <td className="px-6 py-4 font-bold text-slate-800">{bed.room}</td>
+                    <td className="px-6 py-4">
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${
+                        bed.type === 'ICU' ? 'bg-red-100 text-red-600' : bed.type === 'Emergency' ? 'bg-amber-100 text-amber-600' : 'bg-slate-100 text-slate-500'
+                      }`}>{bed.type}</span>
+                    </td>
+                    <td className="px-6 py-4">
+                      <span className={`text-xs font-bold ${
+                        bed.status === 'Available' ? 'text-emerald-600' : bed.status === 'Occupied' ? 'text-red-600' : 'text-amber-600'
+                      }`}>{bed.status}</span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Doctors Table */}
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center">
+              <h2 className="font-bold text-slate-800 flex items-center gap-2"><Stethoscope className="w-5 h-5 text-emerald-600" /> Medical Staff</h2>
+            </div>
+            <table className="w-full">
+              <thead className="bg-slate-50">
+                <tr>
+                  <th className="text-left px-6 py-3 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Name</th>
+                  <th className="text-left px-6 py-3 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Specialization</th>
+                  <th className="text-left px-6 py-3 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Available</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[...mockDoctors, ...mockNurses].map(staff => (
+                  <tr key={staff.id} className="border-t border-slate-50 hover:bg-slate-50/50 transition-colors">
+                    <td className="px-6 py-4 font-bold text-slate-800">{staff.name}</td>
+                    <td className="px-6 py-4 text-sm text-slate-500">{staff.specialization || 'Nursing'}</td>
+                    <td className="px-6 py-4">
+                      <span className={`w-2.5 h-2.5 rounded-full inline-block ${
+                        staff.available ? 'bg-emerald-500' : 'bg-red-400'
+                      }`} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -615,11 +689,27 @@ Respond in VALID JSON only: {"bed":"...", "doctor":"...", "nurseTeam":"...", "re
       {/* Sidebar: Queue */}
       <div className="w-80 border-r border-slate-200 bg-white flex flex-col">
         <div className="p-4 border-b border-slate-200">
-          <div className="flex justify-between items-center mb-4">
+          <div className="flex justify-between items-center mb-3">
             <h2 className="font-bold text-slate-800">Inbound Queue</h2>
             <span className="bg-red-100 text-red-600 text-[10px] font-bold px-2 py-0.5 rounded-full">
-              {incomingAlerts.length} Active
+              {incomingAlerts.length} Cases
             </span>
+          </div>
+          {/* Fix 8: Always-visible status filter tabs */}
+          <div className="flex gap-1 mb-3 p-0.5 bg-slate-100 rounded-lg">
+            {(['Incoming', 'Arrived', 'Handed Over'] as const).map(status => (
+              <button
+                key={status}
+                onClick={() => setStatusFilter(status)}
+                className={`flex-1 py-1.5 text-[10px] font-bold rounded-md transition-all ${
+                  statusFilter === status
+                    ? 'bg-white text-slate-800 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-600'
+                }`}
+              >
+                {status === 'Handed Over' ? 'Done' : status}
+              </button>
+            ))}
           </div>
           <div className="relative">
             <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -642,18 +732,29 @@ Respond in VALID JSON only: {"bed":"...", "doctor":"...", "nurseTeam":"...", "re
             <button
               key={alert.id}
               onClick={() => setSelectedAlertId(alert.id)}
-              className={`w-full p-4 border-b border-slate-50 text-left transition-colors hover:bg-slate-50 ${selectedAlertId === alert.id ? 'bg-blue-50/50 border-l-4 border-l-blue-600' : ''}`}
+              className={`w-full p-4 border-b border-slate-50 text-left transition-all hover:bg-slate-50 ${
+                selectedAlertId === alert.id ? 'bg-blue-50/50 border-l-4 border-l-blue-600' : ''
+              } ${
+                alert.severity === CaseSeverity.CRITICAL ? 'border-l-4 border-l-red-500' : ''
+              } ${
+                isImminent(alert.id) ? 'bg-red-50/50 animate-pulse' : ''
+              } ${
+                (etaSeconds[alert.id] ?? 999) < 300 && !isImminent(alert.id) ? 'bg-amber-50/30' : ''
+              }`}
             >
               <div className="flex justify-between items-start mb-1">
                 <span className="text-xs font-bold text-slate-400">Unit: {alert.ambulanceUnit}</span>
-                <span className="flex items-center gap-1 text-blue-600 text-xs font-bold">
+                <span className={`flex items-center gap-1 text-xs font-bold ${
+                  isImminent(alert.id) ? 'text-red-600' : (etaSeconds[alert.id] ?? 999) < 300 ? 'text-amber-600' : 'text-blue-600'
+                }`}>
                   <Clock className="w-3 h-3" /> {formatEta(alert.id)}
+                  {isImminent(alert.id) && <span className="text-[9px] bg-red-600 text-white px-1.5 py-0.5 rounded font-black ml-1">⚠ IMMINENT</span>}
                 </span>
               </div>
               <h3 className="font-bold text-slate-800">{alert.patientName}, {alert.patientAge}</h3>
               <div className="flex items-center gap-2 mt-2">
                 <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${
-                  alert.severity === CaseSeverity.CRITICAL ? 'bg-red-100 text-red-600' : 'bg-slate-100 text-slate-500'
+                  alert.severity === CaseSeverity.CRITICAL ? 'bg-red-100 text-red-600' : alert.severity === CaseSeverity.SERIOUS ? 'bg-amber-100 text-amber-600' : 'bg-emerald-100 text-emerald-600'
                 }`}>
                   {alert.severity}
                 </span>
@@ -696,6 +797,26 @@ Respond in VALID JSON only: {"bed":"...", "doctor":"...", "nurseTeam":"...", "re
                   <span className="flex items-center gap-1.5"><Shield className="w-4 h-4" /> Medic: {selectedAlert.medicId}</span>
                   <span className="flex items-center gap-1.5"><Clock className="w-4 h-4" /> Vitals @ {latestVitals.timestamp}</span>
                 </div>
+                {/* Show assigned resources if set */}
+                {(selectedAlert.assignedBed || selectedAlert.assignedDoctor || selectedAlert.assignedNurse) && (
+                  <div className="flex items-center gap-4 mt-2">
+                    {selectedAlert.assignedBed && (
+                      <span className="flex items-center gap-1.5 text-emerald-600 font-bold text-sm">
+                        <Bed className="w-4 h-4" /> {selectedAlert.assignedBed}
+                      </span>
+                    )}
+                    {selectedAlert.assignedDoctor && (
+                      <span className="flex items-center gap-1.5 text-blue-600 font-bold text-sm">
+                        <Stethoscope className="w-4 h-4" /> {selectedAlert.assignedDoctor}
+                      </span>
+                    )}
+                    {selectedAlert.assignedNurse && (
+                      <span className="flex items-center gap-1.5 text-purple-600 font-bold text-sm">
+                        <UserCheck className="w-4 h-4" /> {selectedAlert.assignedNurse}
+                      </span>
+                    )}
+                  </div>
+                )}
               </div>
               
               <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-wrap items-center gap-6">
@@ -705,17 +826,25 @@ Respond in VALID JSON only: {"bed":"...", "doctor":"...", "nurseTeam":"...", "re
                  </div>
                  <div className="w-[1px] h-12 bg-slate-100 hidden sm:block"></div>
                  <div className="flex flex-wrap gap-2 items-center">
-                   <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Status</span>
-                   <select 
-                     value={selectedAlert.status} 
-                     onChange={e => updateStatus(selectedAlert.id, e.target.value as 'Incoming' | 'Arrived' | 'Handed Over')}
-                     className="bg-slate-100 border border-slate-200 rounded-lg px-3 py-2 text-sm font-bold text-slate-800 focus:outline-blue-500"
-                   >
-                     <option value="Incoming">Incoming</option>
-                     <option value="Arrived">Arrived</option>
-                     <option value="Handed Over">Handed Over</option>
-                   </select>
-                 </div>
+                    <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Triage</span>
+                    {(['Incoming', 'Arrived', 'Handed Over'] as const).map(status => {
+                      const isActive = selectedAlert.status === status;
+                      const colorMap = {
+                        'Incoming': isActive ? 'bg-blue-600 text-white border-blue-600' : 'border-blue-200 text-blue-600 hover:bg-blue-50',
+                        'Arrived': isActive ? 'bg-emerald-600 text-white border-emerald-600' : 'border-emerald-200 text-emerald-600 hover:bg-emerald-50',
+                        'Handed Over': isActive ? 'bg-slate-700 text-white border-slate-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50',
+                      };
+                      return (
+                        <button
+                          key={status}
+                          onClick={() => updateStatus(selectedAlert.id, status)}
+                          className={`px-4 py-2 rounded-xl text-xs font-bold border-2 transition-all ${colorMap[status]}`}
+                        >
+                          {status}
+                        </button>
+                      );
+                    })}
+                  </div>
                  <button className="flex items-center gap-2 bg-slate-900 text-white px-6 py-3 rounded-xl font-bold hover:bg-slate-800 transition-all">
                     <Phone className="w-4 h-4" /> Contact Medic
                  </button>
@@ -773,11 +902,17 @@ Respond in VALID JSON only: {"bed":"...", "doctor":"...", "nurseTeam":"...", "re
                     </div>
                  </div>
                  <button 
-                   onClick={() => setCurrentView('preassign')}
-                   className="w-full mt-6 bg-blue-600 text-white py-3 rounded-xl text-sm font-bold hover:bg-blue-500 transition-all"
-                 >
-                   Pre-Assign Bed & Team
-                 </button>
+                    onClick={() => setCurrentView('preassign')}
+                    className="w-full mt-6 bg-blue-600 text-white py-3 rounded-xl text-sm font-bold hover:bg-blue-500 transition-all"
+                  >
+                    Pre-Assign Bed & Team
+                  </button>
+                  <button 
+                    onClick={() => setCurrentView('resources')}
+                    className="w-full mt-2 bg-slate-100 text-slate-700 py-3 rounded-xl text-sm font-bold hover:bg-slate-200 transition-all"
+                  >
+                    Manage Resources
+                  </button>
               </div>
             </div>
 
