@@ -82,3 +82,49 @@ export const HOSPITAL_CONFIG = {
     ],
   } as Record<string, string[]>,
 };
+
+// ── Shared resource data ────────────────────────────────────
+// These should eventually come from a Firestore `hospitalResources` collection.
+// For now they live here as the single source of truth for beds and staff.
+
+export interface BedItem {
+  id: string;
+  room: string;
+  type: 'ICU' | 'General' | 'Emergency';
+  status: 'Available' | 'Cleaning' | 'Occupied';
+}
+
+export interface StaffMember {
+  id: string;
+  name: string;
+  specialization?: string;
+  available: boolean;
+}
+
+export const INITIAL_BEDS: BedItem[] = [
+  { id: 'B101', room: 'ICU-1', type: 'ICU', status: 'Available' },
+  { id: 'B102', room: 'ICU-2', type: 'ICU', status: 'Occupied' },
+  { id: 'B103', room: 'ICU-3', type: 'ICU', status: 'Available' },
+  { id: 'B201', room: 'ER-1', type: 'Emergency', status: 'Available' },
+  { id: 'B202', room: 'ER-2', type: 'Emergency', status: 'Cleaning' },
+  { id: 'B203', room: 'ER-3', type: 'Emergency', status: 'Available' },
+  { id: 'B301', room: 'GEN-1', type: 'General', status: 'Available' },
+  { id: 'B302', room: 'GEN-2', type: 'General', status: 'Available' },
+  { id: 'B303', room: 'GEN-3', type: 'General', status: 'Occupied' },
+];
+
+export const DOCTORS: StaffMember[] = [
+  { id: 'D001', name: 'Dr. Amanda Chen', specialization: 'Cardiology', available: true },
+  { id: 'D002', name: 'Dr. James Parker', specialization: 'Emergency Medicine', available: true },
+  { id: 'D003', name: 'Dr. Lisa Thompson', specialization: 'Neurology', available: true },
+  { id: 'D004', name: 'Dr. Robert Martinez', specialization: 'Orthopedics', available: false },
+  { id: 'D005', name: 'Dr. Sarah Johnson', specialization: 'Trauma Surgery', available: true },
+];
+
+export const NURSES: StaffMember[] = [
+  { id: 'N001', name: 'Nurse Emily Roberts', available: true },
+  { id: 'N002', name: 'Nurse Michael Lee', available: true },
+  { id: 'N003', name: 'Nurse Jennifer White', available: false },
+  { id: 'N004', name: 'Nurse David Brown', available: true },
+  { id: 'N005', name: 'Nurse Maria Garcia', available: true },
+];
