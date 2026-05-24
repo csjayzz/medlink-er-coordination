@@ -61,6 +61,9 @@ export interface PreArrivalAlert {
   allergies?: string[];
   knownConditions?: string[];
   timeline?: TimelineEntry[];
+  assignedBed?: string;
+  assignedDoctor?: string;
+  assignedNurse?: string;
 }
 
 export interface MedicProfile {
