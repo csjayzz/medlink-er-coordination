@@ -54,6 +54,7 @@ The project focuses on real-time coordination flows, role-based interfaces, Fire
 - Firestore-backed alert subscriptions
 - Local fallback mode for development and testing
 - Firestore security rules for alert and audit access
+- Demo shared-key AES-GCM encryption for PHI fields across medic and hospital clients
 - Cloud Function support for role assignment
 - Scheduled cleanup function for expired alerts
 
@@ -62,6 +63,7 @@ The project focuses on real-time coordination flows, role-based interfaces, Fire
 - The frontend is a Vite React app with role-based screens for medic and hospital users.
 - Alerts are stored in Firestore when Firebase Auth is active, with local fallback available for development and offline testing.
 - Firebase Hosting serves the SPA, and Firestore rules gate data access by role.
+- PHI fields use a shared-key demo encryption flow so cross-client decryption works in the hospital dashboard; production key management would need a backend-issued key service.
 - Cloud Functions are included for custom claims and scheduled maintenance, but the app can still be demoed without deploying Functions.
 
 ## Local Setup
