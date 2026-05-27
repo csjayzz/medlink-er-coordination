@@ -97,6 +97,7 @@ export interface BedItem {
 export interface StaffMember {
   id: string;
   name: string;
+  role: 'Doctor' | 'Nurse';
   specialization?: string;
   available: boolean;
 }
@@ -114,17 +115,17 @@ export const INITIAL_BEDS: BedItem[] = [
 ];
 
 export const DOCTORS: StaffMember[] = [
-  { id: 'D001', name: 'Dr. Amanda Chen', specialization: 'Cardiology', available: true },
-  { id: 'D002', name: 'Dr. James Parker', specialization: 'Emergency Medicine', available: true },
-  { id: 'D003', name: 'Dr. Lisa Thompson', specialization: 'Neurology', available: true },
-  { id: 'D004', name: 'Dr. Robert Martinez', specialization: 'Orthopedics', available: false },
-  { id: 'D005', name: 'Dr. Sarah Johnson', specialization: 'Trauma Surgery', available: true },
+  { id: 'D001', name: 'Dr. Amanda Chen', role: 'Doctor', specialization: 'Cardiology', available: true },
+  { id: 'D002', name: 'Dr. James Parker', role: 'Doctor', specialization: 'Emergency Medicine', available: true },
+  { id: 'D003', name: 'Dr. Lisa Thompson', role: 'Doctor', specialization: 'Neurology', available: true },
+  { id: 'D004', name: 'Dr. Robert Martinez', role: 'Doctor', specialization: 'Orthopedics', available: false },
+  { id: 'D005', name: 'Dr. Sarah Johnson', role: 'Doctor', specialization: 'Trauma Surgery', available: true },
 ];
 
 export const NURSES: StaffMember[] = [
-  { id: 'N001', name: 'Nurse Emily Roberts', available: true },
-  { id: 'N002', name: 'Nurse Michael Lee', available: true },
-  { id: 'N003', name: 'Nurse Jennifer White', available: false },
-  { id: 'N004', name: 'Nurse David Brown', available: true },
-  { id: 'N005', name: 'Nurse Maria Garcia', available: true },
+  { id: 'N001', name: 'Nurse Emily Roberts', role: 'Nurse', available: true },
+  { id: 'N002', name: 'Nurse Michael Lee', role: 'Nurse', available: true },
+  { id: 'N003', name: 'Nurse Jennifer White', role: 'Nurse', available: false },
+  { id: 'N004', name: 'Nurse David Brown', role: 'Nurse', available: true },
+  { id: 'N005', name: 'Nurse Maria Garcia', role: 'Nurse', available: true },
 ];
