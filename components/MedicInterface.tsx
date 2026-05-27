@@ -510,19 +510,23 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
 
   const transmitAlert = () => {
     const current = formDataRef.current;
+    const transmittedAt = Date.now();
+    const etaMinutes = current.eta ?? 10;
     const finalData: PreArrivalAlert = {
       id: Math.random().toString(36).substr(2, 9),
       patientName: current.patientName || "Unknown",
       patientAge: current.patientAge || "Unknown",
       severity: (current.severity as CaseSeverity) || CaseSeverity.STABLE,
       type: (current.type as EmergencyType) || EmergencyType.OTHER,
-      eta: current.eta ?? 10,
+      eta: etaMinutes,
       vitals: Array.isArray(current.vitals) && current.vitals.length > 0 ? (current.vitals as Vitals[]) : [],
       treatments: Array.isArray(current.treatments) ? current.treatments : [],
       notes: current.notes || "",
       medicId: medic.id,
       ambulanceUnit: medic.unit,
       timestamp: new Date().toISOString(),
+      transmittedAt,
+      etaTargetAt: transmittedAt + etaMinutes * 60 * 1000,
       status: 'Incoming',
       imageUrl: current.imageUrl,
       attachments: Array.isArray(current.attachments) ? current.attachments : []
@@ -653,12 +657,16 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
 
   if (viewMode === 'ALERT_EDIT' && selectedAlert) {
     const handleSaveEdit = () => {
+      const nextEta = formData.eta ?? selectedAlert.eta;
       onUpdateAlert(selectedAlert.id, {
         patientName: formData.patientName ?? selectedAlert.patientName,
         patientAge: formData.patientAge ?? selectedAlert.patientAge,
         severity: (formData.severity as CaseSeverity) ?? selectedAlert.severity,
         type: (formData.type as EmergencyType) ?? selectedAlert.type,
-        eta: formData.eta ?? selectedAlert.eta,
+        eta: nextEta,
+        etaTargetAt: selectedAlert.status === 'Incoming'
+          ? Date.now() + nextEta * 60 * 1000
+          : selectedAlert.etaTargetAt,
         vitals: (formData.vitals as Vitals[]) ?? selectedAlert.vitals,
         treatments: formData.treatments ?? selectedAlert.treatments,
         notes: formData.notes ?? selectedAlert.notes,
