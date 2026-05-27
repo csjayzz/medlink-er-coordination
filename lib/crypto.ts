@@ -1,11 +1,14 @@
 /**
  * AES-256-GCM Field-Level Encryption via Web Crypto API
- * 
- * Client-side stub for encrypting PHI fields before writing to Firestore.
- * Each field gets its own random IV. Key is generated per-session in memory.
- * 
- * TODO: Replace with Cloud Function key endpoint before production.
- * The Cloud Function should issue a per-case key only to matching role/UID.
+ *
+ * Demo-oriented shared-key flow for encrypting PHI fields before Firestore write.
+ * The medic generates a per-session AES key, exports it, and the app stores that
+ * key alongside the alert document so a hospital client can import it and decrypt
+ * the same payload.
+ *
+ * This makes cross-client decryption work for the demo, but it is not production
+ * key management. A real deployment should move key distribution to a trusted
+ * backend such as a Cloud Function or KMS-backed service.
  */
 
 // ── Key Management (client-side stub) ────────────────────────
@@ -13,9 +16,8 @@
 let sessionKey: CryptoKey | null = null;
 
 /**
- * Generate a random AES-256-GCM key for this session.
- * In production, this key should come from an authenticated Cloud Function endpoint.
- * // TODO: Replace with Cloud Function key endpoint before production
+ * Generate a random AES-256-GCM key for this browser session.
+ * The caller can export it for the demo shared-key Firestore flow.
  */
 export async function getOrCreateSessionKey(): Promise<CryptoKey> {
   if (sessionKey) return sessionKey;
@@ -30,8 +32,7 @@ export async function getOrCreateSessionKey(): Promise<CryptoKey> {
 }
 
 /**
- * Export the current session key as a base64 string (for storage/sharing).
- * // TODO: Replace with Cloud Function key endpoint before production
+ * Export the current session key as a base64 string for demo-only sharing.
  */
 export async function exportSessionKey(): Promise<string> {
   const key = await getOrCreateSessionKey();
@@ -40,8 +41,7 @@ export async function exportSessionKey(): Promise<string> {
 }
 
 /**
- * Import a base64-encoded key.
- * // TODO: Replace with Cloud Function key endpoint before production
+ * Import a base64-encoded AES key that was previously exported by the medic client.
  */
 export async function importKey(base64Key: string): Promise<CryptoKey> {
   const rawKey = Uint8Array.from(atob(base64Key), c => c.charCodeAt(0));
@@ -103,7 +103,7 @@ export async function decryptField(encrypted: EncryptedField, key?: CryptoKey): 
 
 /** Fields that contain PHI and must be encrypted before Firestore write */
 const PHI_STRING_FIELDS = ['patientName', 'patientAge', 'notes'] as const;
-const PHI_ARRAY_FIELDS = ['treatments', 'allergies'] as const;
+const PHI_ARRAY_FIELDS = ['treatments', 'allergies', 'knownConditions'] as const;
 
 /**
  * Encrypt all PHI fields in an alert object before writing to Firestore.

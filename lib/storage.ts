@@ -24,7 +24,8 @@ const ALERTS_KEY = 'medlink_alerts';
  */
 export async function createAlertInFirestore(alert: PreArrivalAlert): Promise<string> {
   try {
-    const encrypted = await encryptAlertPHI({ ...alert, transmittedAt: Date.now() });
+    const transmittedAt = alert.transmittedAt ?? Date.now();
+    const encrypted = await encryptAlertPHI({ ...alert, transmittedAt });
     // Store the session encryption key alongside the alert so the hospital
     // (a different browser/session) can decrypt the PHI fields.
     // NOTE: In production this key would be exchanged via Cloud KMS or a
