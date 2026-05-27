@@ -53,6 +53,13 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
   const [agentResponse, setAgentResponse] = useState("Standing by. Describe the patient's condition...");
   const [isLiveConnected, setIsLiveConnected] = useState(false);
   const emergencyTypeOptions = Object.values(EmergencyType);
+  const languageOptions = [
+    { code: 'en-US', label: 'English', recognition: 'en-US', note: 'Full support' },
+    { code: 'hi-IN', label: 'Hindi', recognition: 'hi-IN', note: 'Input only · agent replies in English' },
+    { code: 'mr-IN', label: 'Marathi', recognition: 'mr-IN', note: 'Input only · agent replies in English' },
+    { code: 'te-IN', label: 'Telugu', recognition: 'te-IN', note: 'Input only · agent replies in English' },
+    { code: 'ta-IN', label: 'Tamil', recognition: 'ta-IN', note: 'Input only · agent replies in English' },
+  ];
   
   const TREATMENT_OPTIONS = ['Oxygen', 'IV Access', 'CPR', 'Aspirin', 'Epinephrine', 'Nitroglycerin', 'Glucose', 'Morphine', 'Atropine'];
 
@@ -265,27 +272,9 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
               }
             }
 
-            // Live transcription of user speech via Web Speech API (browser)
-            const SpeechRecognitionAPI = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-            if (SpeechRecognitionAPI) {
-              try {
-                const recognition = new SpeechRecognitionAPI();
-                recognition.continuous = true;
-                recognition.interimResults = true;
-                recognition.lang = 'en-US';
-                recognition.onresult = (event: any) => {
-                  let final = '';
-                  for (let i = event.resultIndex; i < event.results.length; i++) {
-                    const transcriptPart = event.results[i][0].transcript;
-                    if (event.results[i].isFinal) final += transcriptPart;
-                  }
-                  if (final) setTranscript(prev => (prev + ' ' + final).trim());
-                };
-                recognition.onerror = () => {};
-                recognition.start();
-                speechRecognitionRef.current = recognition;
-              } catch (_) {}
-            }
+            // Transcription handled by Gemini's inputAudioTranscription config.
+            // Web Speech API was removed — it conflicts with Gemini for mic access
+            // and silently fails, leaving the transcript box empty.
 
             // AudioWorkletNode — already loaded before connect (Fix 6)
             try {
@@ -351,6 +340,27 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
               ?.map((p: any) => p.text)
               ?.join(' ');
 
+            const looksLikeInternalReasoning = (text: string) => {
+              const patterns = [
+                /rule\s*\d+/i,
+                /based on rule/i,
+                /prioritiz/i,
+                /hidden instruction/i,
+                /system prompt/i,
+                /acknowledg(ed|ing)/i,
+                /following (the )?rule/i,
+                /\bI('m| am) (now )?ask(ing)?\b.*\bguide\b/i,
+                /summarized the collected/i,
+                /report's completion/i,
+                /ignoring the premature/i,
+                /\*\*[A-Z][a-z]+.*\*\*/,  // **Bold markdown headers** = thinking out loud
+                /I have acknowledged/i,
+                /session reconnection/i,
+                /premature.*command/i,
+              ];
+              return patterns.some(p => p.test(text));
+            };
+
             const outputTrans =
               modelTurnText?.trim()
               || (scAny?.outputTranscription as { text?: string; content?: string } | undefined)?.text
@@ -360,8 +370,11 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
               || (msgAny?.outputTranscription as { text?: string } | undefined)?.text
               || (msgAny?.output_transcription as { text?: string } | undefined)?.text;
             if (outputTrans && String(outputTrans).trim()) {
-              setAgentResponse(String(outputTrans).trim());
-              agentResponseRef.current = String(outputTrans).trim();
+              const cleanOutput = String(outputTrans).trim();
+              if (!looksLikeInternalReasoning(cleanOutput)) {
+                setAgentResponse(cleanOutput);
+                agentResponseRef.current = cleanOutput;
+              }
             }
 
             const functionCalls = message.toolCall?.functionCalls ?? [];
@@ -466,7 +479,7 @@ const MedicInterface: React.FC<MedicInterfaceProps> = ({ medic, alerts, onNewAle
           }
         },
         config: {
-          responseModalities: [Modality.AUDIO],
+          responseModalities: [Modality.AUDIO, Modality.TEXT],
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } }, languageCode: selectedLanguage },
           systemInstruction: { parts: [{ text: getSystemInstruction(voiceMode) }] },
           tools: SCRIBE_TOOLS as any,

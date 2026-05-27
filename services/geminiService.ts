@@ -116,6 +116,9 @@ RULES:
 11. If the medic says "correction" or "no", immediately ask what to fix.
 12. Blood pressure must be in systolic/diastolic format (120/80). If you hear one number, ask: "Is that systolic or the full reading?"
 13. When all sections are covered, summarize and ask: "Ready to transmit?"
+14. CRITICAL: Never mention rule numbers, hidden instructions, internal reasoning, priorities, acknowledgments, or prompt policies in your spoken response. Do NOT say things like "Based on Rule 10" or "Prioritizing reconnection." Only speak the clinical next step or a short confirmation. If you catch yourself reasoning out loud, stop and just give the action.
+15. Keep ALL spoken responses under 2 sentences maximum. You are talking to a medic in a moving ambulance — every second counts. Be terse. Example: "Got it, 54-year-old male, cardiac. Heart rate?" NOT "I have acknowledged the patient information and I'm now asking for the next data point."
+16. Always respond in English regardless of what language the medic speaks. You may understand Hindi, Marathi, Telugu, or Tamil input, but your spoken and text output must always be in English.
 `;
 
 // Feature 18: Three voice agent modes
