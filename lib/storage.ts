@@ -10,7 +10,7 @@ import {
   where,
 } from 'firebase/firestore';
 import { db } from './firebase';
-import { encryptAlertPHI, decryptAlertPHI } from './crypto';
+import { encryptAlertPHI, decryptAlertPHI, exportSessionKey, importKey } from './crypto';
 import type { PreArrivalAlert } from '../types';
 
 const ALERTS_COLLECTION = 'medlinkAlerts';
@@ -25,6 +25,12 @@ const ALERTS_KEY = 'medlink_alerts';
 export async function createAlertInFirestore(alert: PreArrivalAlert): Promise<string> {
   try {
     const encrypted = await encryptAlertPHI({ ...alert, transmittedAt: Date.now() });
+    // Store the session encryption key alongside the alert so the hospital
+    // (a different browser/session) can decrypt the PHI fields.
+    // NOTE: In production this key would be exchanged via Cloud KMS or a
+    //       server-side key-management endpoint — not stored in the document.
+    const keyB64 = await exportSessionKey();
+    encrypted._encryptionKey = keyB64;
     await setDoc(doc(db, ALERTS_COLLECTION, alert.id), encrypted);
     return alert.id;
   } catch (err) {
@@ -46,6 +52,10 @@ export async function updateAlertInFirestore(alertId: string, updates: Partial<P
     const phiFields = ['patientName', 'patientAge', 'notes', 'treatments', 'allergies', 'vitals'];
     const hasPHI = Object.keys(updates).some(k => phiFields.includes(k));
     const payload = hasPHI ? await encryptAlertPHI(updates as Record<string, any>) : updates;
+    if (hasPHI) {
+      // Attach the current session key so the hospital can decrypt updated fields
+      (payload as any)._encryptionKey = await exportSessionKey();
+    }
     const docRef = doc(db, ALERTS_COLLECTION, alertId);
     await updateDoc(docRef, payload as any);
   } catch (err) {
@@ -64,19 +74,31 @@ export function subscribeToMedicAlerts(
   try {
     const q = query(
       collection(db, ALERTS_COLLECTION),
-      where('medicId', '==', medicId),
-      orderBy('transmittedAt', 'desc')
+      where('medicId', '==', medicId)
     );
     return onSnapshot(q, async (snapshot) => {
       const rawDocs = snapshot.docs.map(doc => ({
         ...doc.data(),
         id: doc.id,
       }));
-      // Decrypt all PHI fields
+      // Decrypt all PHI fields using the stored encryption key
       const alerts = await Promise.all(
-        rawDocs.map(d => decryptAlertPHI(d).catch(() => d as any))
+        rawDocs.map(async (d) => {
+          try {
+            const raw = d as Record<string, any>;
+            const key = raw._encryptionKey ? await importKey(raw._encryptionKey as string) : undefined;
+            const decrypted = await decryptAlertPHI(raw, key);
+            delete (decrypted as any)._encryptionKey; // don't leak key to UI
+            return decrypted;
+          } catch {
+            return d as any;
+          }
+        })
       );
-      onUpdate(alerts as PreArrivalAlert[]);
+      const sortedAlerts = (alerts as PreArrivalAlert[]).sort(
+        (a, b) => (b.transmittedAt ?? 0) - (a.transmittedAt ?? 0)
+      );
+      onUpdate(sortedAlerts);
     }, (err) => {
       console.warn('Firestore medic subscription error, using localStorage fallback', err);
       onUpdate(loadAlerts().filter(a => a.medicId === medicId));
@@ -105,9 +127,19 @@ export function subscribeToHospitalAlerts(
         ...doc.data(),
         id: doc.id,
       }));
-      // Decrypt all PHI fields
+      // Decrypt all PHI fields using the key the medic stored in the document
       const alerts = await Promise.all(
-        rawDocs.map(d => decryptAlertPHI(d).catch(() => d as any))
+        rawDocs.map(async (d) => {
+          try {
+            const raw = d as Record<string, any>;
+            const key = raw._encryptionKey ? await importKey(raw._encryptionKey as string) : undefined;
+            const decrypted = await decryptAlertPHI(raw, key);
+            delete (decrypted as any)._encryptionKey; // don't leak key to UI
+            return decrypted;
+          } catch {
+            return d as any;
+          }
+        })
       );
       onUpdate(alerts as PreArrivalAlert[]);
     }, (err) => {
