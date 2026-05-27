@@ -15,12 +15,34 @@ import {
 import { isFirebaseConfigured } from './lib/firebase';
 import { Activity, LogOut } from 'lucide-react';
 
-const ETA_TICK_INTERVAL_MS = 60000; // 60 seconds — real-time tick
+const ETA_TICK_INTERVAL_MS = 1000;
 
 function AppContent() {
   const { auth, firebaseUser, medicProfile, logout, loading } = useAuth();
   const [alerts, setAlerts] = useState<PreArrivalAlert[]>(() => loadAlerts());
   const [etaSeconds, setEtaSeconds] = useState<Record<string, number>>({});
+
+  const getAlertEtaSeconds = useCallback((alert: PreArrivalAlert, nowMs: number) => {
+    const fallbackTargetAt = alert.transmittedAt != null
+      ? alert.transmittedAt + alert.eta * 60 * 1000
+      : nowMs + alert.eta * 60 * 1000;
+    const targetAt = alert.etaTargetAt ?? fallbackTargetAt;
+    return Math.max(0, Math.ceil((targetAt - nowMs) / 1000));
+  }, []);
+
+  const addAlert = useCallback((newAlert: PreArrivalAlert) => {
+    setAlerts(prev => [newAlert, ...prev]);
+    if (isFirebaseConfigured && firebaseUser) {
+      void createAlertInFirestore(newAlert);
+    }
+  }, [firebaseUser]);
+
+  const updateAlert = useCallback((alertId: string, updates: Partial<PreArrivalAlert>) => {
+    setAlerts(prev => prev.map(a => a.id === alertId ? { ...a, ...updates } : a));
+    if (isFirebaseConfigured && firebaseUser) {
+      void updateAlertInFirestore(alertId, updates);
+    }
+  }, [firebaseUser]);
 
   // Persist alerts to localStorage in demo mode (no Firebase)
   useEffect(() => {
@@ -51,70 +73,50 @@ function AppContent() {
     }
   }, [auth, firebaseUser, medicProfile]);
 
-  // Initialize etaSeconds for new alerts
-  useEffect(() => {
-    setEtaSeconds(prev => {
-      const next = { ...prev };
-      for (const a of alerts) {
-        if (!(a.id in next) && a.status === 'Incoming') {
-          next[a.id] = a.eta * 60; // convert minutes to seconds
-        }
-      }
-      return next;
-    });
-  }, [alerts]);
-
-  // Second-level countdown for display
+  // Shared ETA countdown derived from one absolute target so hospital and medic stay in sync.
   useEffect(() => {
     const timer = setInterval(() => {
-      setEtaSeconds(prev => {
+      const nowMs = Date.now();
+      setEtaSeconds(() => {
         const next: Record<string, number> = {};
-        for (const [id, sec] of Object.entries(prev)) {
-          const alert = alerts.find(a => a.id === id);
-          if (alert && alert.status === 'Incoming') {
-            next[id] = Math.max(0, sec - 1);
-          } else {
-            next[id] = sec;
+        for (const alert of alerts) {
+          if (alert.status === 'Incoming') {
+            next[alert.id] = getAlertEtaSeconds(alert, nowMs);
           }
         }
         return next;
       });
     }, 1000);
-    return () => clearInterval(timer);
-  }, [alerts]);
 
-  // Sync eta (minutes) field from seconds countdown for persistence
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setAlerts(prev => prev.map(a => {
-        if (a.status !== 'Incoming') return a;
-        const sec = etaSeconds[a.id];
-        if (sec != null) {
-          const newEta = Math.ceil(sec / 60);
-          if (newEta !== a.eta) {
-            return { ...a, eta: newEta, status: sec <= 0 ? 'Incoming' : a.status };
-          }
+    const nowMs = Date.now();
+    setEtaSeconds(() => {
+      const next: Record<string, number> = {};
+      for (const alert of alerts) {
+        if (alert.status === 'Incoming') {
+          next[alert.id] = getAlertEtaSeconds(alert, nowMs);
         }
-        return a;
-      }));
-    }, ETA_TICK_INTERVAL_MS);
+      }
+      return next;
+    });
+
     return () => clearInterval(timer);
-  }, [etaSeconds]);
+  }, [alerts, getAlertEtaSeconds]);
 
-  const addAlert = useCallback((newAlert: PreArrivalAlert) => {
-    setAlerts(prev => [newAlert, ...prev]);
-    if (isFirebaseConfigured && firebaseUser) {
-      void createAlertInFirestore(newAlert);
-    }
-    // localStorage persistence handled by the effect above for demo mode
-  }, [firebaseUser]);
+  // Auto-transition overdue incoming alerts so Medic moves them to History and Hospital to Arrived.
+  useEffect(() => {
+    const overdue = alerts.filter(alert => {
+      if (alert.status !== 'Incoming') return false;
+      const remaining = etaSeconds[alert.id];
+      return remaining != null ? remaining <= 0 : alert.eta <= 0;
+    });
 
-  const updateAlert = useCallback((alertId: string, updates: Partial<PreArrivalAlert>) => {
-    setAlerts(prev => prev.map(a => a.id === alertId ? { ...a, ...updates } : a));
-    if (isFirebaseConfigured && firebaseUser) {
-      void updateAlertInFirestore(alertId, updates);
-    }
-  }, [firebaseUser]);
+    overdue.forEach(alert => {
+      updateAlert(alert.id, {
+        status: 'Arrived',
+        eta: 0,
+      });
+    });
+  }, [alerts, etaSeconds, updateAlert]);
 
   if (loading) {
     return (
