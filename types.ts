@@ -55,6 +55,7 @@ export interface PreArrivalAlert {
   ambulanceUnit: string;
   timestamp: string;
   transmittedAt?: number;  // epoch ms — used for Firestore TTL + ordering
+  etaTargetAt?: number;    // epoch ms — shared absolute ETA target for consistent countdowns
   imageUrl?: string;
   attachments?: AlertAttachment[];
   status: 'Incoming' | 'Arrived' | 'Handed Over';
